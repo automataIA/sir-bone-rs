@@ -10,6 +10,9 @@ updates:
       # the crate is unmaintained. Never bump past the 2.x line.
       - dependency-name: "bincode"
         versions: [">=3.0.0"]
+      # ratatui + ratatui-markdown must move in lockstep; a solo ratatui-markdown
+      # bump pulls ratatui-core, splitting Line/Span into two distinct types.
+      - dependency-name: "ratatui-markdown"
     groups:
       rust-dependencies:
         patterns:
