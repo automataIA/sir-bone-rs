@@ -1,8 +1,8 @@
 # Sir Bone
 
 <div class="sirbone-demo-embed">
-  <iframe src="demo/index.html" title="Sir Bone TUI — live demo" loading="lazy"></iframe>
-  <p class="sirbone-demo-cap">▲ Live TUI demo (WebAssembly, no API key). <strong>Click the terminal</strong> to give it keyboard focus, then try <kbd>Alt</kbd>+<kbd>P</kbd> (palette), <kbd>Alt</kbd>+<kbd>A</kbd> (about), or just type. <a href="demo/index.html" target="_blank" rel="noopener">Open full-screen ↗</a></p>
+  <iframe src="/sir-bone-rs/demo/" title="Sir Bone TUI — live demo" loading="lazy"></iframe>
+  <p class="sirbone-demo-cap">▲ Live TUI demo (WebAssembly, no API key). <strong>Click the terminal</strong> to give it keyboard focus, then try <kbd>Alt</kbd>+<kbd>P</kbd> (palette), <kbd>Alt</kbd>+<kbd>A</kbd> (about), or just type. <a href="/sir-bone-rs/demo/" target="_blank" rel="noopener">Open full-screen ↗</a></p>
 </div>
 
 **Sir Bone** is a Rust CLI coding agent: it streams responses from an LLM, executes
