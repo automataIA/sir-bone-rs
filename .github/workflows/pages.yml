@@ -20,7 +20,7 @@ concurrency:
 
 env:
   TRUNK_VERSION: v0.21.14
-  MDBOOK_VERSION: v0.4.40
+  MDBOOK_VERSION: v0.5.3
 
 jobs:
   build:

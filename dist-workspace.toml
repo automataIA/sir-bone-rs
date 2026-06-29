@@ -17,5 +17,5 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-# Inject extra steps (rust-cache) into the build job; see build-setup.yml
-github-build-setup = "build-setup.yml"
+# Inject extra steps (rust-cache) into the build job.
+github-build-setup = ".github/dist/build-setup.yml"
