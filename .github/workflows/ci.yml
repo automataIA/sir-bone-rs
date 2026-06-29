@@ -45,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Verified floor: darling 0.23 needs 1.88; rmcp→process-wrap needs edition2024 (1.85).
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
 
