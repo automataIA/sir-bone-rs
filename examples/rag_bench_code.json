@@ -1,0 +1,14 @@
+[
+  {"kind": "exact", "doc": ".sirbone/docs/hono@4.x.md", "query": "getCookie helper usage", "expected_lines": [4982, 4995]},
+  {"kind": "exact", "doc": ".sirbone/docs/hono@4.x.md", "query": "setCookie cookie value options", "expected_lines": [4982, 4995]},
+  {"kind": "exact", "doc": ".sirbone/docs/hono@4.x.md", "query": "deleteCookie import", "expected_lines": [4961, 4975]},
+  {"kind": "exact", "doc": ".sirbone/docs/hono@4.x.md", "query": "streamSSE signature stream", "expected_lines": [4053, 4075]},
+  {"kind": "exact", "doc": ".sirbone/docs/hono@4.x.md", "query": "createMiddleware typed env", "expected_lines": [4666, 4740]},
+  {"kind": "exact", "doc": ".sirbone/docs/hono@4.x.md", "query": "getRouterName function", "expected_lines": [4450, 4470]},
+  {"kind": "exact", "doc": ".sirbone/docs/hono@4.x.md", "query": "bearerAuth token middleware", "expected_lines": [7380, 7400]},
+  {"kind": "exact", "doc": ".sirbone/docs/hono@4.x.md", "query": "validator form value", "expected_lines": [10995, 11015]},
+  {"kind": "concept", "doc": ".sirbone/docs/hono@4.x.md", "query": "how to stream server sent events response", "expected_lines": [4053, 4075]},
+  {"kind": "concept", "doc": ".sirbone/docs/hono@4.x.md", "query": "validate the request payload before handler", "expected_lines": [4399, 4420]},
+  {"kind": "concept", "doc": ".sirbone/docs/hono@4.x.md", "query": "read a route path parameter from the request", "expected_lines": [630, 640]},
+  {"kind": "concept", "doc": ".sirbone/docs/hono@4.x.md", "query": "create custom middleware that runs before routes", "expected_lines": [4666, 4740]}
+]

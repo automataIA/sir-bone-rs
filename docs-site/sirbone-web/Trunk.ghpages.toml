@@ -1,0 +1,14 @@
+# GitHub Pages build config (used by .github/workflows/pages.yml).
+# public_url is NOT hardcoded here — the workflow passes it via
+#   trunk build --config Trunk.ghpages.toml --public-url "/<repo>/demo/"
+# so the asset prefix always matches the actual repository name.
+[build]
+target = "index.html"
+release = true
+filehash = true
+minify = "on_release"
+
+# Pin binaryen (see Trunk.toml): without this a stale system wasm-opt v108
+# mishandles the externref table and the demo crashes on wasm init.
+[tools]
+wasm_opt = "version_123"

@@ -1,0 +1,14 @@
+# Local dev config: `trunk serve` → http://localhost:8080
+[build]
+target = "index.html"
+
+[serve]
+port = 8080
+
+# Pin binaryen: a stale system wasm-opt (e.g. /usr/bin wasm-opt v108, which
+# predates the reference-types proposal) mishandles the multi-table externref
+# output and leaves the `__wbindgen_externrefs` export pointed at the full
+# funcref table, so `__wbindgen_init_externref_table`'s grow(4) throws at wasm
+# init. version_123 (already in trunk's tool cache) handles externref correctly.
+[tools]
+wasm_opt = "version_123"

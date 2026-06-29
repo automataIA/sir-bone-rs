@@ -1,0 +1,119 @@
+[package]
+name = "sir-bone-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["carcall <wolvie1986@gmail.com>"]
+description = "Sir Bone — a from-scratch AI coding agent in Rust: streams LLM responses, runs tools (bash, file ops, web fetch), with REPL and TUI modes. Anthropic + OpenAI-compatible providers, prompt caching, extended thinking, MCP."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/automataIA/sir-bone-rs"
+homepage = "https://github.com/automataIA/sir-bone-rs"
+readme = "README.md"
+keywords = ["ai", "agent", "llm", "cli", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.88"  # floor: darling 0.23 needs 1.88; rmcp→process-wrap needs edition2024 (1.85). Verified building on 1.88.0.
+# Whitelist what ships to crates.io. Without this, `cargo package` bundles bench/,
+# docs-site/, logos/ (~7MB of media) and internal notes (CRONOLOGIA/PROMPT/proposta/roi).
+include = [
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/.env.example",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/NOTICE",
+    "/assets/sirbone.bin",
+]
+
+[lib]
+name = "sirbone"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sirbone"
+path = "src/main.rs"
+
+[dependencies]
+tokio        = { version = "1", features = ["full"] }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = { version = "1", features = ["raw_value"] }
+anyhow       = "1"
+async-trait  = "0.1"
+tokio-util   = "0.7"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tui-logger   = { version = "0.17.3", default-features = false, features = ["tracing-support"] }
+futures      = "0.3"
+similar      = "2"
+regex        = "1"
+glob         = "0.3"
+ignore       = "0.4"
+url          = "2"
+bincode      = "1.3"
+schemars     = { version = "1", features = ["derive"] }
+async-openai = { version = "0.40", default-features = false, features = ["rustls-no-provider", "chat-completion", "model"] }
+reqwest      = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+clap         = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+clap_mangen  = "0.2"
+base64       = "0.22"
+dirs         = "5"
+uuid         = { version = "1", features = ["v4"] }
+chrono       = { version = "0.4", features = ["serde"] }
+rustyline-async = "0.4"
+dotenvy      = "0.15"
+rustls       = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+crossterm    = { version = "0.29", default-features = false, features = ["windows"] }
+ratatui      = { version = "0.29", features = ["crossterm"] }
+ratatui-markdown = { version = "0.3", features = ["markdown", "mermaid"] }
+synoptic = "2.2.9"
+pulldown-cmark = { version = "0.13", default-features = false }
+rmcp = { version = "1.7", default-features = false, features = ["client", "transport-child-process"] }
+# Local doc retrieval (BM25) — OPTIONAL, gated by the `rag` feature so the default
+# binary stays dependency-light (single-binary identity). Powers the doc_search tool.
+tantivy = { version = "0.22", optional = true }
+
+[features]
+# Off by default. Enables tantivy + the doc_search tool: `cargo build --features rag`.
+rag = ["dep:tantivy"]
+
+[[example]]
+name = "rag_spike"
+required-features = ["rag"]
+
+[[example]]
+name = "rag_bench"
+required-features = ["rag"]
+
+[dev-dependencies]
+tokio    = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+httpmock = "0.8"
+async-trait = "0.1"
+tokio-util  = "0.7"
+rustls      = { version = "0.23", default-features = false, features = ["ring"] }
+assert_cmd  = "2"
+predicates  = "3"
+proptest    = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Speed-first: sirbone is interactive (TUI raw-mode) + I/O/network bound.
+# panic=abort is intentionally OMITTED — abort skips unwind, so the terminal
+# raw-mode guard's Drop never runs and a panic leaves the terminal corrupted.
+# opt-level=3 (not "z"): binary size is irrelevant for a dev tool; the hot
+# paths (markdown/syntax render) want speed, and size is dominated by deps.
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+strip         = true
+
+# The profile that 'dist' will build with. Released binaries get full fat LTO
+# for max runtime performance — release builds are rare (per tag), so the
+# longer CI compile is an acceptable trade for the goal "maximum performance".
+[profile.dist]
+inherits = "release"
+lto = "fat"

@@ -1,0 +1,17 @@
+[
+  {"doc": "README.md", "query": "prompt caching cache_control breakpoints anthropic", "expected_lines": [132, 132]},
+  {"doc": "README.md", "query": "binary size 6.5 MB vs node_modules node", "expected_lines": [42, 42]},
+  {"doc": "README.md", "query": "web_fetch SSRF guard private internal addresses", "expected_lines": [109, 109]},
+  {"doc": "README.md", "query": "context compaction at 87.5% of the window keeps last 6", "expected_lines": [147, 147]},
+  {"doc": "README.md", "query": "SWE-bench Lite resolved benchmark glm", "expected_lines": [50, 50]},
+  {"doc": "README.md", "query": "retry-loop breaker same tool fails 3 times change strategy", "expected_lines": [146, 146]},
+  {"doc": "DESCRIZIONE_PROGETTO.md", "query": "controllo compaction se token 87.5% context_window", "expected_lines": [79, 80]},
+  {"doc": "DESCRIZIONE_PROGETTO.md", "query": "cancellazione CancellationToken tokio select", "expected_lines": [268, 268]},
+  {"doc": "DESCRIZIONE_PROGETTO.md", "query": "workspace crates pi-agent pi-ai pi-cli pi-tui", "expected_lines": [14, 14]},
+  {"doc": "confronto.md", "query": "risparmio LOC rust vs typescript -68% engine", "expected_lines": [47, 47]},
+  {"doc": "confronto.md", "query": "Skills LOC core skills.ts comparison", "expected_lines": [41, 41]},
+  {"doc": "confronto.md", "query": "TUI lines of code 26165 strict comparison", "expected_lines": [56, 58]},
+  {"doc": "CONFRONTO-CLAUDE-CODE.md", "query": "skills system prompt XML available_skills blocks formatSkillsForPrompt", "expected_lines": [62, 69]},
+  {"doc": "CONFRONTO-CLAUDE-CODE.md", "query": "session resume continue automatically last session", "expected_lines": [43, 43]},
+  {"doc": "CONFRONTO-CLAUDE-CODE.md", "query": "keybindings two level TUI app namespaced migration", "expected_lines": [74, 79]}
+]

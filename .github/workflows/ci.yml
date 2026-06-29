@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: clippy · test · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # nextest: process-per-test parallelism + flaky detection (does not run
+      # doctests, so those run separately).
+      - name: Test
+        run: cargo nextest run --all-features
+
+      - name: Doctests
+        run: cargo test --all-features --doc
+
+      - name: Build (release)
+        run: cargo build --release
+
+  msrv:
+    name: MSRV 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Verified floor: darling 0.23 needs 1.88; rmcp→process-wrap needs edition2024 (1.85).
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build
+
+  deny:
+    name: cargo-deny (licenses · advisories · bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  coverage:
+    name: coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      # Informational baseline — generates lcov.info; does not fail the build yet.
+      - name: Coverage
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+  # Mutation testing on the lines a PR changed only — fast, and catches new code
+  # that is executed but not asserted. No cron: it runs per-PR against the diff,
+  # not the whole tree. HARD GATE: a surviving mutant on a changed line fails the
+  # job. Scope (src/** only) and known-equivalent exclusions live in .cargo/mutants.toml.
+  mutants:
+    name: mutation testing (PR diff)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@cargo-mutants
+      - name: Mutants on changed lines
+        # --in-place: skip the source copy (bench/ has nested target/ locks that
+        # break it); the CI checkout is disposable so mutating in place is safe.
+        run: |
+          git diff "origin/${{ github.base_ref }}"...HEAD > pr.diff
+          cargo mutants --in-place --in-diff pr.diff
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-out
+          path: mutants.out/
