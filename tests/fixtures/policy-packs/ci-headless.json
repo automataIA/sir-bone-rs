@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo fmt --check*)",
+      "Bash(cargo test*)",
+      "Bash(cargo clippy*)",
+      "Bash(git status*)",
+      "read(*)",
+      "grep(*)",
+      "glob(*)",
+      "find(*)",
+      "ls(*)"
+    ],
+    "soft_deny": [
+      "Bash(git push*)",
+      "Bash(cargo publish*)",
+      "Bash(rm*)",
+      "write(*)",
+      "edit(*)",
+      "sed(*)",
+      "undo(*)",
+      "save_skill(*)"
+    ],
+    "environment": [
+      "Headless CI environment. Prefer read-only diagnostics and test commands; do not publish, push, or mutate trusted user configuration."
+    ]
+  },
+  "hooks": {
+    "pre_tool_use": [
+      {
+        "match": "bash",
+        "command": "python3 -c 'import json,sys; p=json.load(sys.stdin); c=p.get(\"input\",{}).get(\"command\",\"\"); sys.exit(2 if \"--no-verify\" in c else 1)'"
+      }
+    ],
+    "post_tool_use": {
+      "*.rs": "cargo check -q --message-format=short"
+    },
+    "stop": []
+  },
+  "spend_cap": {
+    "enabled": true,
+    "max_tokens": 500000
+  },
+  "mcp": {
+    "enabled": []
+  }
+}

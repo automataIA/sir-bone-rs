@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "read(*)",
+      "grep(*)",
+      "glob(*)",
+      "find(*)",
+      "ls(*)",
+      "web_fetch(*)",
+      "fetch_docs(*)",
+      "mcp__context7__*"
+    ],
+    "soft_deny": [
+      "Bash(*)",
+      "write(*)",
+      "edit(*)",
+      "sed(*)",
+      "undo(*)",
+      "save_skill(*)"
+    ],
+    "environment": [
+      "Documentation research mode. Allow trusted documentation lookups; ask before shell commands or file mutation."
+    ]
+  },
+  "hooks": {
+    "pre_tool_use": [],
+    "post_tool_use": {},
+    "stop": []
+  },
+  "spend_cap": {
+    "enabled": true,
+    "max_tokens": 300000
+  },
+  "mcp": {
+    "enabled": [
+      "context7"
+    ]
+  }
+}

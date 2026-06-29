@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo fmt*)",
+      "Bash(cargo test*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "read(*)",
+      "grep(*)",
+      "glob(*)",
+      "find(*)",
+      "ls(*)"
+    ],
+    "soft_deny": [
+      "Bash(cargo publish*)",
+      "Bash(git push*)",
+      "Bash(rm*)",
+      "Bash(sudo*)",
+      "write(*)",
+      "edit(*)",
+      "sed(*)",
+      "undo(*)",
+      "save_skill(*)"
+    ],
+    "environment": [
+      "Local development workspace. Ask before destructive shell commands, publishing, or edits to trusted Sir Bone configuration."
+    ]
+  },
+  "hooks": {
+    "pre_tool_use": [],
+    "post_tool_use": {
+      "*.rs": "cargo check -q --message-format=short"
+    },
+    "stop": []
+  },
+  "spend_cap": {
+    "enabled": true,
+    "max_tokens": 250000
+  },
+  "mcp": {
+    "enabled": []
+  }
+}
