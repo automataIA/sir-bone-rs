@@ -51,7 +51,10 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/automataIA/sir-bon
 ```
 
 ```bash
-# Or from source (needs a Rust toolchain)
+# From crates.io (needs a Rust toolchain)
+cargo install sir-bone-rs --locked
+
+# Or the latest from source
 cargo install --git https://github.com/automataIA/sir-bone-rs --locked
 ```
 
