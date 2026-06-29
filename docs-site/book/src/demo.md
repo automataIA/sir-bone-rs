@@ -4,7 +4,7 @@ The whole TUI runs **in your browser** — compiled to WebAssembly with
 [ratzilla](https://github.com/orhun/ratzilla), no API key, no install.
 
 <p>
-  <a href="demo/index.html" target="_blank" rel="noopener"
+  <a href="/sir-bone-rs/demo/" target="_blank" rel="noopener"
      style="display:inline-block;padding:0.6em 1.2em;border-radius:8px;
             background:#ffb454;color:#0b0e14;font-weight:700;text-decoration:none;">
     ▶ Open the interactive demo
