@@ -1,0 +1,38 @@
+[package]
+name = "sirbone-web"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace: isolates this crate from the parent sir-bone-rs package so
+# the main build never compiles it (and vice-versa). The render modules are pulled
+# in by `#[path]` from ../../src/tui/ — see src/main.rs.
+[workspace]
+
+[dependencies]
+# ratzilla 0.2 pins ratatui 0.29 — the exact version the sir-bone render modules
+# target. (ratzilla 0.3 jumped to ratatui 0.30 and would break the #[path] reuse.)
+ratzilla = "0.2"
+# default-features=false → no crossterm backend on wasm; ratzilla supplies the backend.
+ratatui = { version = "0.29", default-features = false }
+# default-features=false drops ratatui-markdown's `default` feature, which otherwise
+# enables ratatui/default → crossterm (won't build on wasm32).
+ratatui-markdown = { version = "0.3", default-features = false, features = ["markdown", "mermaid"] }
+synoptic = "2.2.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Drop-in std::time replacement that works in the browser (Instant uses performance.now).
+web-time = "1"
+# wasmbind feature makes chrono::Local::now() work in the browser (tool-box clocks).
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
+
+# ratatui-markdown 0.3.6 pulls `ratatui` with default features → `crossterm`, which
+# doesn't build on wasm32. Its source never touches crossterm, so we patch in a local
+# copy whose only change is `ratatui = { default-features = false }`. See
+# ../vendor/ratatui-markdown/.
+[patch.crates-io]
+ratatui-markdown = { path = "../vendor/ratatui-markdown" }
+
+[profile.release]
+opt-level = "s"
+lto = true

@@ -1,0 +1,369 @@
+/* mdBook theme variables.
+ *
+ * :root carries the sirbone brand palette (default theme + "Auto" fallback,
+ * since Auto applies a class with no matching CSS and falls through to :root).
+ * Each .{name} block below is one TUI palette, switched from the theme picker.
+ * Colors are lifted verbatim from src/tui/theme.rs so the docs and the mock's
+ * Alt+P cycle match exactly.
+ *
+ * Regenerate: uv run python /tmp/gen_palettes.py
+ */
+:root {
+    --sidebar-target-width: 300px;
+    --sidebar-width: min(var(--sidebar-target-width), 80vw);
+    --sidebar-resize-indicator-width: 8px;
+    --sidebar-resize-indicator-space: 2px;
+    --page-padding: 15px;
+    --content-max-width: 750px;
+    --menu-bar-height: 50px;
+    --mono-font: "Source Code Pro", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace, monospace;
+    --code-font-size: 0.875em;
+    --searchbar-margin-block-start: 5px;
+
+    --bg: #0F1117;
+    --fg: #D4D4D8;
+
+    --sidebar-bg: #0F1117;
+    --sidebar-fg: #D4D4D8;
+    --sidebar-non-existant: #616D7B;
+    --sidebar-active: #E4701C;
+    --sidebar-spacer: #2A2D35;
+
+    --scrollbar: #616D7B;
+
+    --icons: #616D7B;
+    --icons-hover: #D4D4D8;
+
+    --links: #5B9BD5;
+    --inline-code-color: #E4701C;
+
+    --theme-popup-bg: #0F1117;
+    --theme-popup-border: #2A2D35;
+    --theme-hover: #2A2D35;
+
+    --quote-bg: #2A2D35;
+    --quote-border: #E4701C;
+
+    --warning-border: #E4701C;
+
+    --table-border-color: #2A2D35;
+    --table-header-bg: #2A2D35;
+    --table-alternate-bg: #0F1117;
+
+    --searchbar-border-color: #2A2D35;
+    --searchbar-bg: #0F1117;
+    --searchbar-fg: #D4D4D8;
+    --searchbar-shadow-color: #E4701C;
+    --searchresults-header-fg: #616D7B;
+    --searchresults-border-color: #2A2D35;
+    --searchresults-li-bg: #0F1117;
+    --search-mark-bg: #E4701C;
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(45%) sepia(6%) saturate(621%) hue-rotate(198deg) brightness(99%) contrast(85%);
+    --copy-button-filter-hover: invert(68%) sepia(55%) saturate(531%) hue-rotate(341deg) brightness(104%) contrast(101%);
+
+    --footnote-highlight: #5B9BD5;
+
+    --overlay-bg: rgba(15, 17, 23, 0.4);
+
+    --blockquote-note-color: #5B9BD5;
+    --blockquote-tip-color: #6ABF69;
+    --blockquote-important-color: #B482D2;
+    --blockquote-warning-color: #E4701C;
+    --blockquote-caution-color: #D4545E;
+
+    --sidebar-header-border-color: #E4701C;
+}
+
+.catppuccin {
+    --bg: #1E1E2E;
+    --fg: #CDD6F4;
+
+    --sidebar-bg: #1E1E2E;
+    --sidebar-fg: #CDD6F4;
+    --sidebar-non-existant: #6C7086;
+    --sidebar-active: #FAB387;
+    --sidebar-spacer: #45475A;
+
+    --scrollbar: #6C7086;
+
+    --icons: #6C7086;
+    --icons-hover: #CDD6F4;
+
+    --links: #89B4FA;
+    --inline-code-color: #FAB387;
+
+    --theme-popup-bg: #1E1E2E;
+    --theme-popup-border: #45475A;
+    --theme-hover: #45475A;
+
+    --quote-bg: #45475A;
+    --quote-border: #FAB387;
+
+    --warning-border: #FAB387;
+
+    --table-border-color: #45475A;
+    --table-header-bg: #45475A;
+    --table-alternate-bg: #1E1E2E;
+
+    --searchbar-border-color: #45475A;
+    --searchbar-bg: #1E1E2E;
+    --searchbar-fg: #CDD6F4;
+    --searchbar-shadow-color: #FAB387;
+    --searchresults-header-fg: #6C7086;
+    --searchresults-border-color: #45475A;
+    --searchresults-li-bg: #1E1E2E;
+    --search-mark-bg: #FAB387;
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(45%) sepia(6%) saturate(621%) hue-rotate(198deg) brightness(99%) contrast(85%);
+    --copy-button-filter-hover: invert(68%) sepia(55%) saturate(531%) hue-rotate(341deg) brightness(104%) contrast(101%);
+
+    --footnote-highlight: #89B4FA;
+
+    --overlay-bg: rgba(30, 30, 46, 0.4);
+
+    --blockquote-note-color: #89B4FA;
+    --blockquote-tip-color: #A6E3A1;
+    --blockquote-important-color: #CBA6F7;
+    --blockquote-warning-color: #FAB387;
+    --blockquote-caution-color: #F38BA8;
+
+    --sidebar-header-border-color: #FAB387;
+}
+
+.tokyo-night {
+    --bg: #24283B;
+    --fg: #C0CAF5;
+
+    --sidebar-bg: #24283B;
+    --sidebar-fg: #C0CAF5;
+    --sidebar-non-existant: #6E759A;
+    --sidebar-active: #FF9E64;
+    --sidebar-spacer: #3B4261;
+
+    --scrollbar: #6E759A;
+
+    --icons: #6E759A;
+    --icons-hover: #C0CAF5;
+
+    --links: #7AA2F7;
+    --inline-code-color: #FF9E64;
+
+    --theme-popup-bg: #24283B;
+    --theme-popup-border: #3B4261;
+    --theme-hover: #3B4261;
+
+    --quote-bg: #3B4261;
+    --quote-border: #FF9E64;
+
+    --warning-border: #FF9E64;
+
+    --table-border-color: #3B4261;
+    --table-header-bg: #3B4261;
+    --table-alternate-bg: #24283B;
+
+    --searchbar-border-color: #3B4261;
+    --searchbar-bg: #24283B;
+    --searchbar-fg: #C0CAF5;
+    --searchbar-shadow-color: #FF9E64;
+    --searchresults-header-fg: #6E759A;
+    --searchresults-border-color: #3B4261;
+    --searchresults-li-bg: #24283B;
+    --search-mark-bg: #FF9E64;
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(45%) sepia(6%) saturate(621%) hue-rotate(198deg) brightness(99%) contrast(85%);
+    --copy-button-filter-hover: invert(68%) sepia(55%) saturate(531%) hue-rotate(341deg) brightness(104%) contrast(101%);
+
+    --footnote-highlight: #7AA2F7;
+
+    --overlay-bg: rgba(36, 40, 59, 0.4);
+
+    --blockquote-note-color: #7AA2F7;
+    --blockquote-tip-color: #9ECE6A;
+    --blockquote-important-color: #BB9AF7;
+    --blockquote-warning-color: #FF9E64;
+    --blockquote-caution-color: #F7768E;
+
+    --sidebar-header-border-color: #FF9E64;
+}
+
+.gruvbox {
+    --bg: #1D2021;
+    --fg: #D4BE98;
+
+    --sidebar-bg: #1D2021;
+    --sidebar-fg: #D4BE98;
+    --sidebar-non-existant: #7C6F64;
+    --sidebar-active: #FE8019;
+    --sidebar-spacer: #3C3836;
+
+    --scrollbar: #7C6F64;
+
+    --icons: #7C6F64;
+    --icons-hover: #D4BE98;
+
+    --links: #83A598;
+    --inline-code-color: #FE8019;
+
+    --theme-popup-bg: #1D2021;
+    --theme-popup-border: #3C3836;
+    --theme-hover: #3C3836;
+
+    --quote-bg: #3C3836;
+    --quote-border: #FE8019;
+
+    --warning-border: #FE8019;
+
+    --table-border-color: #3C3836;
+    --table-header-bg: #3C3836;
+    --table-alternate-bg: #1D2021;
+
+    --searchbar-border-color: #3C3836;
+    --searchbar-bg: #1D2021;
+    --searchbar-fg: #D4BE98;
+    --searchbar-shadow-color: #FE8019;
+    --searchresults-header-fg: #7C6F64;
+    --searchresults-border-color: #3C3836;
+    --searchresults-li-bg: #1D2021;
+    --search-mark-bg: #FE8019;
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(45%) sepia(6%) saturate(621%) hue-rotate(198deg) brightness(99%) contrast(85%);
+    --copy-button-filter-hover: invert(68%) sepia(55%) saturate(531%) hue-rotate(341deg) brightness(104%) contrast(101%);
+
+    --footnote-highlight: #83A598;
+
+    --overlay-bg: rgba(29, 32, 33, 0.4);
+
+    --blockquote-note-color: #83A598;
+    --blockquote-tip-color: #B8BB26;
+    --blockquote-important-color: #D3869B;
+    --blockquote-warning-color: #FE8019;
+    --blockquote-caution-color: #FB4934;
+
+    --sidebar-header-border-color: #FE8019;
+}
+
+.rose-pine {
+    --bg: #191724;
+    --fg: #E0DEF4;
+
+    --sidebar-bg: #191724;
+    --sidebar-fg: #E0DEF4;
+    --sidebar-non-existant: #6E6A86;
+    --sidebar-active: #F6C177;
+    --sidebar-spacer: #26233A;
+
+    --scrollbar: #6E6A86;
+
+    --icons: #6E6A86;
+    --icons-hover: #E0DEF4;
+
+    --links: #9CCFD8;
+    --inline-code-color: #F6C177;
+
+    --theme-popup-bg: #191724;
+    --theme-popup-border: #26233A;
+    --theme-hover: #26233A;
+
+    --quote-bg: #26233A;
+    --quote-border: #F6C177;
+
+    --warning-border: #F6C177;
+
+    --table-border-color: #26233A;
+    --table-header-bg: #26233A;
+    --table-alternate-bg: #191724;
+
+    --searchbar-border-color: #26233A;
+    --searchbar-bg: #191724;
+    --searchbar-fg: #E0DEF4;
+    --searchbar-shadow-color: #F6C177;
+    --searchresults-header-fg: #6E6A86;
+    --searchresults-border-color: #26233A;
+    --searchresults-li-bg: #191724;
+    --search-mark-bg: #F6C177;
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(45%) sepia(6%) saturate(621%) hue-rotate(198deg) brightness(99%) contrast(85%);
+    --copy-button-filter-hover: invert(68%) sepia(55%) saturate(531%) hue-rotate(341deg) brightness(104%) contrast(101%);
+
+    --footnote-highlight: #9CCFD8;
+
+    --overlay-bg: rgba(25, 23, 36, 0.4);
+
+    --blockquote-note-color: #9CCFD8;
+    --blockquote-tip-color: #31748F;
+    --blockquote-important-color: #C4A7E7;
+    --blockquote-warning-color: #F6C177;
+    --blockquote-caution-color: #EB6F92;
+
+    --sidebar-header-border-color: #F6C177;
+}
+
+.nord {
+    --bg: #2E3440;
+    --fg: #D8DEE9;
+
+    --sidebar-bg: #2E3440;
+    --sidebar-fg: #D8DEE9;
+    --sidebar-non-existant: #7B8291;
+    --sidebar-active: #D08770;
+    --sidebar-spacer: #3B4252;
+
+    --scrollbar: #7B8291;
+
+    --icons: #7B8291;
+    --icons-hover: #D8DEE9;
+
+    --links: #81A1C1;
+    --inline-code-color: #D08770;
+
+    --theme-popup-bg: #2E3440;
+    --theme-popup-border: #3B4252;
+    --theme-hover: #3B4252;
+
+    --quote-bg: #3B4252;
+    --quote-border: #D08770;
+
+    --warning-border: #D08770;
+
+    --table-border-color: #3B4252;
+    --table-header-bg: #3B4252;
+    --table-alternate-bg: #2E3440;
+
+    --searchbar-border-color: #3B4252;
+    --searchbar-bg: #2E3440;
+    --searchbar-fg: #D8DEE9;
+    --searchbar-shadow-color: #D08770;
+    --searchresults-header-fg: #7B8291;
+    --searchresults-border-color: #3B4252;
+    --searchresults-li-bg: #2E3440;
+    --search-mark-bg: #D08770;
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(45%) sepia(6%) saturate(621%) hue-rotate(198deg) brightness(99%) contrast(85%);
+    --copy-button-filter-hover: invert(68%) sepia(55%) saturate(531%) hue-rotate(341deg) brightness(104%) contrast(101%);
+
+    --footnote-highlight: #81A1C1;
+
+    --overlay-bg: rgba(46, 52, 64, 0.4);
+
+    --blockquote-note-color: #81A1C1;
+    --blockquote-tip-color: #A3BE8C;
+    --blockquote-important-color: #B48EAD;
+    --blockquote-warning-color: #D08770;
+    --blockquote-caution-color: #BF616A;
+
+    --sidebar-header-border-color: #D08770;
+}
+

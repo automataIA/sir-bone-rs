@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/fira_code.min.css"
+    />
+    <link data-trunk rel="rust" data-wasm-opt="z" data-weak-refs />
+    <title>Sir Bone — TUI demo</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100vh;
+        /* keep arrows / space / PgUp-Dn from scrolling the page — the TUI owns them */
+        overflow: hidden;
+        /* Match the docs sirbone theme bg (SIRBONE.bg in src/tui/theme.rs) so the
+           embedded iframe blends seamlessly into the page instead of showing a
+           different shade around the centered TUI. */
+        background-color: #0F1117;
+      }
+      body {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+      pre {
+        font-family: "Fira Code", monospace;
+        font-size: 15px;
+        line-height: 1.0;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>This interactive demo needs JavaScript / WebAssembly enabled.</noscript>
+  </body>
+</html>

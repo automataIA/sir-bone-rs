@@ -1,0 +1,18 @@
+[book]
+title = "Sir Bone"
+description = "A Rust CLI coding agent — streams LLM responses, runs tools, renders in REPL or TUI."
+authors = ["Sir Bone contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "sirbone"
+preferred-dark-theme = "sirbone"
+git-repository-url = "https://github.com/carcall/sir-bone-rs"
+edit-url-template = "https://github.com/carcall/sir-bone-rs/edit/main/docs-site/book/{path}"
+no-section-label = true
+additional-css = ["theme/custom.css"]
+
+[output.html.fold]
+enable = true
+level = 1

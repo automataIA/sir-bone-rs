@@ -1,0 +1,16 @@
+sir-bone-rs
+Copyright (c) 2026 carcall <wolvie1986@gmail.com>
+
+This product includes software inspired by and derived in part from "Pi"
+(https://github.com/earendil-works/pi), an AI coding agent by Mario Zechner,
+licensed under the MIT License (Copyright (c) 2025 Mario Zechner).
+
+This product bundles, under assets/skills/, a curated and adapted subset of
+"Skills For Real Engineers" (https://skills.sh/mattpocock/skills) by Matt
+Pocock, licensed under the MIT License (Copyright (c) 2026 Matt Pocock). The
+full license text is preserved at assets/skills/LICENSE. Some skills were
+modified for single-agent use; the originals are unmodified upstream.
+
+Behavioral fragments in the system prompt (src/main.rs) and the reference
+material under claude-code-system-prompts/ are distilled from Anthropic's
+Claude Code system prompts.

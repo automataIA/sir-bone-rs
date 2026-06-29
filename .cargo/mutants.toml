@@ -1,0 +1,22 @@
+# cargo-mutants configuration — measures test reliability by injecting bugs and
+# checking the suite catches them.
+#
+# Run locally:  cargo mutants --in-place
+# `--in-place` mutates the working tree directly (restored after each mutant)
+# instead of copying it. The copy path fails here because bench/ carries nested
+# target/ dirs with unreadable lock files; in-place sidesteps that entirely.
+
+# Only mutate the crate sources — skip the python bench harness, examples,
+# playground, etc. (Also bounds the per-PR `--in-diff` run.)
+examine_globs = ["src/**"]
+
+# Known-equivalent / observability-only mutants: no behavioral test can kill
+# them. Excluding keeps the gate honest (a missed mutant means a real test gap).
+#   - glob_matches early-return: for the patterns "*" / "**" the general matcher
+#     already returns true, so flipping `||`→`&&` in the shortcut is unobservable.
+#   - handle_event cache-stats guard (`cache_read > 0 || cache_creation > 0`):
+#     gates only a `tracing::info!` debug line — no observable behavior.
+exclude_re = [
+    "replace \\|\\| with && in glob_matches",
+    "(>|<|==|>=|&&|\\|\\|) in handle_event",
+]
