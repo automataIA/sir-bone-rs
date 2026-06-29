@@ -1,6 +1,6 @@
 #[test]
 fn policy_pack_json_files_parse() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/policy-packs");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/policy-packs");
     let entries = std::fs::read_dir(&dir).expect("policy-packs dir");
     let mut seen = 0;
     for entry in entries {

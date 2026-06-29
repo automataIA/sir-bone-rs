@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    ignore:
+      # bincode 3.0.0 is a tombstone release (single compile_error!, xkcd/2347);
+      # the crate is unmaintained. Never bump past the 2.x line.
+      - dependency-name: "bincode"
+        versions: [">=3.0.0"]
     groups:
       rust-dependencies:
         patterns:
@@ -15,3 +20,7 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"

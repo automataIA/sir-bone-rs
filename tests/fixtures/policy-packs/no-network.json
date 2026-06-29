@@ -1,0 +1,53 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo fmt*)",
+      "Bash(cargo test*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "read(*)",
+      "grep(*)",
+      "glob(*)",
+      "find(*)",
+      "ls(*)",
+      "write(*)",
+      "edit(*)",
+      "sed(*)",
+      "undo(*)"
+    ],
+    "soft_deny": [
+      "web_fetch(*)",
+      "web_search(*)",
+      "fetch_docs(*)",
+      "Bash(curl*)",
+      "Bash(wget*)",
+      "Bash(npm install*)",
+      "Bash(npx*)",
+      "Bash(cargo publish*)",
+      "Bash(git push*)",
+      "save_skill(*)"
+    ],
+    "environment": [
+      "Offline workspace. Do not access the network unless the user explicitly authorizes it."
+    ]
+  },
+  "hooks": {
+    "pre_tool_use": [
+      {
+        "match": "bash",
+        "command": "python3 -c 'import json,re,sys; c=json.load(sys.stdin).get(\"input\",{}).get(\"command\",\"\"); sys.exit(2 if re.search(r\"\\b(curl|wget|npx)\\b\", c) else 1)'"
+      }
+    ],
+    "post_tool_use": {
+      "*.rs": "cargo check -q --message-format=short"
+    },
+    "stop": []
+  },
+  "spend_cap": {
+    "enabled": true,
+    "max_tokens": 250000
+  },
+  "mcp": {
+    "enabled": []
+  }
+}
