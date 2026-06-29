@@ -68,12 +68,15 @@ impl TypedTool for BashTool {
         // process_group(0): bash leads its own group, so on timeout we can signal
         // the whole group (bash + grandchildren) instead of just the leader.
         // kill_on_drop is belt-and-suspenders for the leader when the future drops.
-        let child = Command::new("bash")
+        let mut command = Command::new("bash");
+        command
             .arg("-c")
             .arg(&input.command)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
             .kill_on_drop(true)
             .spawn()
             .context("failed to spawn bash")?;
