@@ -1,0 +1,7 @@
+# Injected into the cargo-dist build-local-artifacts job via
+# `github-build-setup` in dist-workspace.toml. Caches ~/.cargo + ./target so
+# release builds reuse dependency artifacts across runs.
+- name: Cache cargo registry and target
+  uses: Swatinem/rust-cache@v2
+  with:
+    cache-on-failure: "false"
