@@ -1,0 +1,108 @@
+# Rust build artifacts.
+# Cargo.lock is committed: this crate ships a binary, so the lockfile must be
+# tracked for reproducible builds and `cargo install --git`.
+target
+
+# Editor / IDE build output (source lives in editors/vscode/src)
+node_modules/
+editors/vscode/out/
+package-lock.json
+editors/vscode/*.vsix
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Project scratch / lab-output directories
+docs/
+bench/
+.playwright-cli/
+
+# Reproducible evaluation source. Generated runs, provider outputs, caches and
+# credentials remain ignored by the broad rules above; only the immutable
+# harness inputs and code are visible to Git.
+!bench/
+bench/*
+!bench/eval_harness/
+bench/eval_harness/*
+!bench/eval_harness/*.py
+!bench/eval_harness/*.md
+!bench/eval_harness/*.sh
+!bench/eval_harness/acb_*.json
+!bench/eval_harness/feature_catalog.json
+!bench/eval_harness/quarantine.json
+!bench/eval_harness/docker/
+!bench/eval_harness/docker/**
+!bench/eval_harness/ab_skills/
+!bench/eval_harness/ab_skills/**
+!bench/eval_harness/ab_skills_config/
+!bench/eval_harness/ab_skills_config/**
+!bench/eval_harness/feature-audit-schedules/
+!bench/eval_harness/feature-audit-schedules/**
+bench/eval_harness/feature-audit.md
+!bench/claw/
+bench/claw/*
+!bench/claw/*.py
+!bench/claw/*.md
+!bench/claw/*.sh
+!bench/specbench/
+bench/specbench/*
+!bench/specbench/*.py
+!bench/specbench/*.md
+!bench/specbench/*.sh
+!bench/specbench/human_pilot.example.jsonl
+!bench/specbench/checks/
+!bench/specbench/checks/**
+!bench/specbench/schedules/
+!bench/specbench/schedules/**
+!bench/specbench/tasks/
+!bench/specbench/tasks/**
+!bench/specbench/workspaces/
+!bench/specbench/workspaces/**
+
+# Version the compact benchmark contract and decision layer, not the wider
+# scratch/docs tree.
+!docs/
+docs/*
+!docs/ACB_HARNESS.md
+!docs/BENCH_DECISIONS.md
+!docs/EVAL_HARNESS_PLAN.md
+!docs/EVAL_RESUME.md
+!docs/STATUS.md
+!docs/TESTING.md
+!docs/SEALED_EVALUATOR_RUNBOOK.md
+
+# Python cache artifacts can appear inside otherwise-whitelisted fixture trees.
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+
+# Root-level hidden files and scratch notes.
+# Anchored to root (leading /) so nested markdown — docs-site/book, playground,
+# vendored READMEs — stays tracked; only top-level hidden files and .md notes
+# are ignored.
+/.*
+/*.md
+
+# Exceptions — keep these tracked
+!/.gitignore
+!.github/
+!.vscode/
+!.cargo/
+!.env.example
+!README.md
+!MISSION.md
+!CONTRIBUTING.md
+!SECURITY.md
+!LICENSE*
+!NOTICE
+!playground/repl_tasks.sh

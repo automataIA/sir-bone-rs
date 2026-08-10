@@ -73,6 +73,10 @@ impl Snapshots {
             .arg("--work-tree")
             .arg(&self.work_tree)
             .args(args)
+            // `rollback` parses porcelain-ish output ("Would remove …"), which
+            // git translates: on an Italian system it prints "Eliminerei …" and
+            // the deleted files are never named to the user.
+            .env("LC_ALL", "C")
             .current_dir(&self.work_tree)
             .output()
             .await
