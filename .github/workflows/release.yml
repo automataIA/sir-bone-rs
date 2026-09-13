@@ -280,7 +280,16 @@ jobs:
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          # Re-running the pipeline for an existing tag (re-pushed to re-cut a
+          # release) must not fail: `gh release create` errors when the release
+          # already exists, so update it in place instead.
+          TAG="${{ needs.plan.outputs.tag }}"
+          if gh release view "$TAG" --json id --jq .id >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber artifacts/*
+            gh release edit "$TAG" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt"
+          else
+            gh release create "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          fi
 
   announce:
     needs:
