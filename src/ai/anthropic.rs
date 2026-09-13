@@ -27,18 +27,34 @@ pub struct AnthropicClient {
     /// Context window of the active model, lazily fetched from `/v1/models/{id}`
     /// and cached. 0 = not fetched yet (reset by `set_model`).
     context_window: std::sync::atomic::AtomicU32,
+    /// Rules that abort generation mid-stream. Empty by default, so the hot
+    /// path is untouched unless the user configured `stream_rules`.
+    stream_rules: std::sync::RwLock<std::sync::Arc<crate::stream_rules::StreamRules>>,
+    /// Sampling temperature. None = field omitted, provider default applies.
+    /// Sent verbatim, never clamped: models after Claude Opus 4.6 reject any
+    /// value other than 1.0 with a 400, and that error must reach the user.
+    temperature: Option<f32>,
 }
 
 impl AnthropicClient {
     pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: crate::ai::http_client(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: std::sync::RwLock::new(model.to_string()),
             thinking_budget: std::sync::atomic::AtomicU32::new(0),
             context_window: std::sync::atomic::AtomicU32::new(0),
+            stream_rules: std::sync::RwLock::new(std::sync::Arc::default()),
+            temperature: None,
         }
+    }
+
+    /// Fix the sampling temperature for the life of the client (bench runs pin
+    /// it so both arms of an A/B sample alike).
+    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
     }
 }
 
@@ -47,6 +63,7 @@ fn to_anthropic_request(
     registry: &ToolRegistry,
     model: &str,
     thinking_budget: Option<u32>,
+    glm: bool,
 ) -> serde_json::Value {
     let mut system: Option<String> = None;
     let mut anthro_msgs: Vec<serde_json::Value> = vec![];
@@ -201,8 +218,19 @@ fn to_anthropic_request(
         body["tools"] = serde_json::Value::Array(tools);
     }
 
-    // Extended thinking
-    if let Some(budget) = thinking_budget {
+    // Extended thinking. GLM on z.ai ignores the budget semantics: the dial
+    // maps to reasoning-effort levels instead ("disabled" keeps the light
+    // default, an explicit effort raises it — verified live against api.z.ai).
+    if glm {
+        match thinking_budget {
+            None => body["thinking"] = serde_json::json!({"type": "disabled"}),
+            Some(_) => {
+                body["thinking"] = serde_json::json!({"type": "enabled"});
+                body["reasoning_effort"] =
+                    serde_json::json!(super::glm_effort_label(thinking_budget));
+            }
+        }
+    } else if let Some(budget) = thinking_budget {
         body["thinking"] = serde_json::json!({
             "type": "enabled",
             "budget_tokens": budget
@@ -260,10 +288,22 @@ impl LlmClient for AnthropicClient {
     ) -> Result<TurnResult> {
         // Clone out of the lock so no guard is held across an `.await`.
         let model = crate::types::read_or_recover(&self.model).clone();
-        let body = to_anthropic_request(messages, registry, &model, self.thinking_budget());
+        let mut body = to_anthropic_request(
+            messages,
+            registry,
+            &model,
+            self.thinking_budget(),
+            super::is_glm(&self.base_url, &model),
+        );
+        if let Some(t) = self.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
         let url = format!("{}/v1/messages", self.base_url);
         // Real window when discoverable; conservative fallback otherwise.
         let context_window = self.context_window().await.unwrap_or(200_000);
+        // Cloned out of the lock for the same reason as `model`. Empty unless
+        // the user configured `stream_rules`, and then the check is skipped.
+        let rules = crate::types::read_or_recover(&self.stream_rules).clone();
 
         let mut text_parts: Vec<String> = vec![];
         let mut thinking_parts: Vec<String> = vec![];
@@ -281,16 +321,23 @@ impl LlmClient for AnthropicClient {
             attempt += 1;
 
             // --- send (network failure is retryable) ---
-            let resp = match self
+            // Wrapped in select! so Esc/Ctrl-C interrupts *while waiting for the
+            // response* too, not only once the byte stream has started — with a
+            // reasoning model the server can hold the connection for many seconds
+            // before the first byte, and that wait must be cancellable.
+            let send = self
                 .http
                 .post(&url)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body)
-                .send()
-                .await
-            {
+                .send();
+            let sent = select! {
+                r = send => r,
+                _ = cancel.cancelled() => break Outcome::Cancelled,
+            };
+            let resp = match sent {
                 Ok(r) => r,
                 Err(e) => {
                     let e = enrich_reqwest_error(e);
@@ -342,6 +389,10 @@ impl LlmClient for AnthropicClient {
             tool_map.clear();
             let mut byte_stream = resp.bytes_stream();
             let mut line_buf = String::new();
+            // Rolling tail of the generated text, matched against the stream
+            // rules. `rule_cursor` is how much of `text_parts` it already holds.
+            let mut rule_tail = String::new();
+            let mut rule_cursor = 0usize;
 
             let stream_outcome = 'stream: loop {
                 select! {
@@ -372,6 +423,16 @@ impl LlmClient for AnthropicClient {
                                                         };
                                                     }
                                                     handle_event(ev, &mut text_parts, &mut thinking_parts, &mut tool_map, &mut usage, events, context_window).await;
+                                                    if !rules.is_empty() {
+                                                        while rule_cursor < text_parts.len() {
+                                                            rule_tail.push_str(&text_parts[rule_cursor]);
+                                                            rule_cursor += 1;
+                                                        }
+                                                        rule_tail = crate::stream_rules::window(&rule_tail).to_string();
+                                                        if let Some(rule) = rules.trip(&rule_tail, &[]) {
+                                                            break 'stream Outcome::RuleTripped(rule.name.clone());
+                                                        }
+                                                    }
                                                 }
                                             }
                                             line_buf.drain(..=pos);
@@ -414,6 +475,16 @@ impl LlmClient for AnthropicClient {
                     assistant_message: Message::assistant(text),
                     state: AgentState::Done,
                     usage,
+                    tripped_rule: None,
+                });
+            }
+            Outcome::RuleTripped(name) => {
+                return Ok(TurnResult {
+                    // Partial by construction — the agent discards it.
+                    assistant_message: Message::assistant(text_parts.join("")),
+                    state: AgentState::Done,
+                    usage,
+                    tripped_rule: Some(name),
                 });
             }
             Outcome::Fatal(e) => {
@@ -437,6 +508,7 @@ impl LlmClient for AnthropicClient {
                 assistant_message: Message::assistant(text),
                 state: AgentState::Done,
                 usage,
+                tripped_rule: None,
             });
         }
 
@@ -474,10 +546,12 @@ impl LlmClient for AnthropicClient {
         Ok(TurnResult {
             assistant_message: Message {
                 role: Role::Assistant,
+                injected: false,
                 content,
             },
             state: AgentState::ToolCalling(tool_calls),
             usage,
+            tripped_rule: None,
         })
     }
 
@@ -543,6 +617,12 @@ impl LlmClient for AnthropicClient {
             .store(budget.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
     }
 
+    fn set_stream_rules(&self, rules: std::sync::Arc<crate::stream_rules::StreamRules>) {
+        if let Ok(mut slot) = self.stream_rules.write() {
+            *slot = rules;
+        }
+    }
+
     fn thinking_budget(&self) -> Option<u32> {
         match self
             .thinking_budget
@@ -557,7 +637,13 @@ impl LlmClient for AnthropicClient {
         let model = crate::types::read_or_recover(&self.model).clone();
         // Same system + tools + messages assembly as a real request, minus the
         // fields the count endpoint rejects, so the count matches what we send.
-        let mut body = to_anthropic_request(messages, registry, &model, None);
+        let mut body = to_anthropic_request(
+            messages,
+            registry,
+            &model,
+            None,
+            super::is_glm(&self.base_url, &model),
+        );
         if let Some(obj) = body.as_object_mut() {
             obj.remove("max_tokens");
             obj.remove("stream");
@@ -613,6 +699,7 @@ async fn handle_event(
                         used_tokens: (tokens + cache_read + cache_creation) as u32,
                         context_window,
                         cached_tokens: cache_read as u32,
+                        output_tokens: 0,
                     })
                     .await
                     .ok();
@@ -623,9 +710,12 @@ async fn handle_event(
         // Emit again from here so token accounting isn't stuck at zero.
         "message_delta" => {
             // Output tokens are reported here (final cumulative count for the message).
-            if let Some(out) = ev["usage"]["output_tokens"].as_u64() {
+            let output_tokens = ev["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            if output_tokens > 0 {
+                let out = output_tokens;
                 usage.output = out as u32;
             }
+            let mut emitted = false;
             if let Some(tokens) = ev["usage"]["input_tokens"].as_u64() {
                 if tokens > 0 {
                     let cache_read = ev["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0);
@@ -638,10 +728,26 @@ async fn handle_event(
                             used_tokens: (tokens + cache_read + cache_creation) as u32,
                             context_window,
                             cached_tokens: cache_read as u32,
+                            output_tokens: usage.output,
                         })
                         .await
                         .ok();
+                    emitted = true;
                 }
+            }
+            // Native Anthropic streams input usage at message_start and output
+            // usage at message_delta. Emit the latter separately; consumers do
+            // not count this zero-input event as another model call.
+            if output_tokens > 0 && !emitted {
+                events
+                    .send(AgentEvent::ContextUsage {
+                        used_tokens: 0,
+                        context_window,
+                        cached_tokens: 0,
+                        output_tokens: output_tokens as u32,
+                    })
+                    .await
+                    .ok();
             }
         }
         "content_block_start" => {
@@ -708,6 +814,10 @@ const RETRY_AFTER_CAP_SECS: u64 = 120;
 enum Outcome {
     /// Stream completed; assemble the turn from the accumulators.
     Done,
+    /// A configured stream rule matched the text being generated: abort now,
+    /// discard the partial message, and let the agent re-run the turn with the
+    /// rule injected as a reminder.
+    RuleTripped(String),
     /// User cancelled (Ctrl-C) — never retried.
     Cancelled,
     /// Transient failure; the outer loop retries after backoff.
@@ -772,6 +882,7 @@ mod tests {
             Message::system("SYS"),
             Message {
                 role: Role::User,
+                injected: false,
                 content: vec![
                     ContentBlock::Text { text: "hi".into() },
                     ContentBlock::Image {
@@ -783,6 +894,7 @@ mod tests {
             Message::user("just text"),
             Message {
                 role: Role::Assistant,
+                injected: false,
                 content: vec![
                     ContentBlock::Thinking {
                         thinking: "th".into(),
@@ -799,7 +911,13 @@ mod tests {
         ];
         let mut reg = ToolRegistry::new();
         reg.register(ReadTool::default());
-        let body = to_anthropic_request(&msgs.iter().collect::<Vec<_>>(), &reg, "m", Some(1024));
+        let body = to_anthropic_request(
+            &msgs.iter().collect::<Vec<_>>(),
+            &reg,
+            "m",
+            Some(1024),
+            false,
+        );
 
         // Top-level shape (kills the `Default::default()` whole-body mutant).
         assert_eq!(body["model"], "m");
@@ -860,6 +978,7 @@ mod tests {
             &ToolRegistry::new(),
             "m",
             None,
+            false,
         );
         let m = body["messages"].as_array().unwrap();
         assert_eq!(m[0]["content"][0]["type"], "text");
@@ -873,6 +992,7 @@ mod tests {
         // (pins the `!text.is_empty()` guard against both true/false mutations).
         let msgs = [Message {
             role: Role::Assistant,
+            injected: false,
             content: vec![
                 ContentBlock::Text {
                     text: String::new(),
@@ -889,6 +1009,7 @@ mod tests {
             &ToolRegistry::new(),
             "m",
             None,
+            false,
         );
         let blocks = body["messages"][0]["content"].as_array().unwrap();
         assert!(
@@ -898,6 +1019,59 @@ mod tests {
         assert!(blocks.iter().any(|b| b["type"] == "tool_use"));
         // No thinking budget -> no thinking field.
         assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn glm_budget_maps_to_reasoning_effort_not_tokens() {
+        // On z.ai the dial's levels are effort: budget_tokens must not appear,
+        // and every level must carry an explicit reasoning_effort.
+        let msgs = [Message::user("hi")];
+        let refs = &msgs.iter().collect::<Vec<_>>();
+        for (budget, effort) in [
+            (Some(8000), "low"),
+            (Some(16000), "medium"),
+            (Some(32000), "max"),
+        ] {
+            let body = to_anthropic_request(refs, &ToolRegistry::new(), "glm-5.2", budget, true);
+            assert_eq!(body["thinking"]["type"], "enabled", "budget {budget:?}");
+            assert_eq!(body["reasoning_effort"], effort, "budget {budget:?}");
+            assert!(
+                body["thinking"].get("budget_tokens").is_none(),
+                "budget {budget:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn glm_off_sends_explicit_disabled() {
+        // Without this, z.ai treats the absent field as a server default —
+        // the dial's "off" must pin the light behaviour instead of hoping.
+        let msgs = [Message::user("hi")];
+        let body = to_anthropic_request(
+            &msgs.iter().collect::<Vec<_>>(),
+            &ToolRegistry::new(),
+            "glm-5.2",
+            None,
+            true,
+        );
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn non_glm_budget_stays_token_budget() {
+        // Real Anthropic semantics must be untouched by the GLM mapping.
+        let msgs = [Message::user("hi")];
+        let body = to_anthropic_request(
+            &msgs.iter().collect::<Vec<_>>(),
+            &ToolRegistry::new(),
+            "claude-opus-4-7",
+            Some(1024),
+            false,
+        );
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     // --- handle_event: arms that emit events ---
@@ -925,6 +1099,7 @@ mod tests {
                 used_tokens,
                 context_window,
                 cached_tokens,
+                ..
             } = ev
             {
                 assert_eq!(
@@ -938,6 +1113,36 @@ mod tests {
             }
         }
         assert!(saw_usage, "message_start should emit ContextUsage");
+    }
+
+    #[tokio::test]
+    async fn handle_event_message_delta_emits_output_usage_without_double_call_input() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (mut tp, mut th, mut tm) = (Vec::new(), Vec::new(), HashMap::new());
+        let mut usage = crate::types::TokenUsage::default();
+        handle_event(
+            json!({"type":"message_delta","usage":{"output_tokens":37}}),
+            &mut tp,
+            &mut th,
+            &mut tm,
+            &mut usage,
+            &tx,
+            200_000,
+        )
+        .await;
+        drop(tx);
+        assert_eq!(usage.output, 37);
+        match rx.recv().await {
+            Some(AgentEvent::ContextUsage {
+                used_tokens,
+                output_tokens,
+                ..
+            }) => {
+                assert_eq!(used_tokens, 0, "output-only delta is not another call");
+                assert_eq!(output_tokens, 37);
+            }
+            other => panic!("expected output usage event, got {other:?}"),
+        }
     }
 
     #[tokio::test]

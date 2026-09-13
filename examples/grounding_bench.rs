@@ -24,7 +24,12 @@ fn build_fixture(root: &Path) {
 }
 
 /// (draft, must-contain substrings, must-NOT-contain substrings, label)
-type Case = (&'static str, &'static [&'static str], &'static [&'static str], &'static str);
+type Case = (
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static str,
+);
 
 fn cases() -> Vec<Case> {
     vec![

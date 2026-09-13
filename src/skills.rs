@@ -34,15 +34,23 @@ pub fn path_globs_match(cwd: &Path, globs: &[String]) -> bool {
     })
 }
 
-/// Scan global (`~/.sirbone/skills/`) and local (`.sirbone/skills/`) directories
-/// for every skill present, ignoring any disable list. Local skills override
-/// global ones with the same name. Used by the TUI skill picker, which needs to
-/// show disabled skills too (so they can be re-enabled).
+/// Scan global (`~/.sirbone/skills/`, `~/.agents/skills/`) and local
+/// (`.sirbone/skills/`, `.agents/skills/`) directories for every skill present,
+/// ignoring any disable list. Sir Bone's native `.sirbone/skills` roots are the
+/// canonical home; `.agents/skills` is read for cross-client compatibility.
+/// Project-local skills override user-level skills with the same name. Used by
+/// the TUI skill picker, which needs to show disabled skills too (so they can be
+/// re-enabled).
 pub fn scan_all_skills() -> Vec<SkillMeta> {
     let mut skills = Vec::new();
 
-    // 1. global
+    // 1. user-level compatibility, then native (native wins name collisions)
     if let Some(home) = dirs::home_dir() {
+        scan_dir(
+            &home.join(".agents").join("skills"),
+            Scope::Global,
+            &mut skills,
+        );
         scan_dir(
             &home.join(".sirbone").join("skills"),
             Scope::Global,
@@ -50,7 +58,8 @@ pub fn scan_all_skills() -> Vec<SkillMeta> {
         );
     }
 
-    // 2. local (overrides global by name)
+    // 2. project-level compatibility, then native (project and native win)
+    scan_dir(Path::new(".agents/skills"), Scope::Local, &mut skills);
     scan_dir(Path::new(".sirbone/skills"), Scope::Local, &mut skills);
 
     skills
@@ -70,7 +79,7 @@ pub fn scan_skills() -> Vec<SkillMeta> {
     skills
 }
 
-/// Parse a single `SKILL.md` given its direct path (scope defaults to local).
+/// Parse a single `SKILL.md`/`skill.md` given its direct path (scope defaults to local).
 pub fn scan_one(skill_md: &Path) -> Option<SkillMeta> {
     parse_frontmatter(skill_md, Scope::Local)
 }
@@ -97,15 +106,23 @@ fn scan_dir(dir: &Path, scope: Scope, skills: &mut Vec<SkillMeta>) {
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        let skill_md = entry.path().join("SKILL.md");
+        let Some(skill_md) = find_skill_md(&entry.path()) else {
+            continue;
+        };
         if let Some(meta) = parse_frontmatter(&skill_md, scope.clone()) {
-            // local overrides global: remove existing with same name
-            if scope == Scope::Local {
-                skills.retain(|s| s.name != meta.name);
-            }
+            // Later roots are higher precedence: native overrides compatibility,
+            // and project-local roots override user-level roots.
+            skills.retain(|s| s.name != meta.name);
             skills.push(meta);
         }
     }
+}
+
+fn find_skill_md(skill_dir: &Path) -> Option<PathBuf> {
+    ["SKILL.md", "skill.md"]
+        .iter()
+        .map(|name| skill_dir.join(name))
+        .find(|path| path.is_file())
 }
 
 fn parse_frontmatter(path: &Path, scope: Scope) -> Option<SkillMeta> {
@@ -118,15 +135,32 @@ fn parse_frontmatter(path: &Path, scope: Scope) -> Option<SkillMeta> {
     let mut description = None;
     let mut always = false;
     let mut paths = Vec::new();
-    for line in front.lines() {
-        let line = line.trim();
-        if let Some(v) = line.strip_prefix("name:") {
-            name = Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
-        } else if let Some(v) = line.strip_prefix("description:") {
-            description = Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
-        } else if let Some(v) = line.strip_prefix("always:") {
+
+    let lines: Vec<&str> = front.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed.is_empty() {
+            i += 1;
+            continue;
+        }
+        if let Some(v) = trimmed.strip_prefix("name:") {
+            name = Some(inline_value(v.trim()));
+        } else if let Some(v) = trimmed.strip_prefix("description:") {
+            let v = v.trim();
+            if let Some(folded) = block_scalar_style(v) {
+                // `description: >-` / `description: |-` — multi-line block scalar.
+                // Consume the indented continuation lines so the value isn't read
+                // as the literal marker (`>-`).
+                let (body, consumed) = collect_block_scalar(&lines[i + 1..], folded);
+                description = Some(body);
+                i += consumed;
+            } else {
+                description = Some(inline_value(v));
+            }
+        } else if let Some(v) = trimmed.strip_prefix("always:") {
             always = v.trim().eq_ignore_ascii_case("true");
-        } else if let Some(v) = line.strip_prefix("paths:") {
+        } else if let Some(v) = trimmed.strip_prefix("paths:") {
             // Accept a flow-sequence (`paths: ["*.rs", "*.toml"]`) or a bare
             // comma list (`paths: *.rs, *.toml`).
             paths = v
@@ -134,10 +168,11 @@ fn parse_frontmatter(path: &Path, scope: Scope) -> Option<SkillMeta> {
                 .trim_start_matches('[')
                 .trim_end_matches(']')
                 .split(',')
-                .map(|p| p.trim().trim_matches('"').trim_matches('\'').to_string())
+                .map(|p| inline_value(p.trim()))
                 .filter(|p| !p.is_empty())
                 .collect();
         }
+        i += 1;
     }
 
     Some(SkillMeta {
@@ -148,6 +183,70 @@ fn parse_frontmatter(path: &Path, scope: Scope) -> Option<SkillMeta> {
         always,
         paths,
     })
+}
+
+/// Strip surrounding single/double quotes from an inline frontmatter value.
+fn inline_value(v: &str) -> String {
+    v.trim_matches('"').trim_matches('\'').to_string()
+}
+
+/// Detect a YAML block-scalar marker: `>` (folded) or `|` (literal). Chomping
+/// and indent modifiers (`-`, `+`, digits) are accepted but only the style is
+/// returned. `None` means a plain inline value.
+fn block_scalar_style(v: &str) -> Option<bool> {
+    match v.trim_start().chars().next()? {
+        '>' => Some(true),
+        '|' => Some(false),
+        _ => None,
+    }
+}
+
+/// Collect a folded (`>`) or literal (`|`) block scalar body from the lines
+/// following the marker. The block ends at the first line indented less than
+/// the body (a sibling key) or at end of input. Returns the joined value and
+/// how many lines were consumed. Default chomping: trailing blank lines drop.
+fn collect_block_scalar(lines: &[&str], folded: bool) -> (String, usize) {
+    let mut block_indent: Option<usize> = None;
+    let mut body: Vec<&str> = Vec::new();
+    let mut consumed = 0;
+    for line in lines {
+        if line.trim().is_empty() {
+            consumed += 1;
+            body.push("");
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let bi = match block_indent {
+            None => {
+                block_indent = Some(indent);
+                indent
+            }
+            Some(bi) if indent < bi => break,
+            Some(bi) => bi,
+        };
+        body.push(&line[bi..]);
+        consumed += 1;
+    }
+    while body.last().is_some_and(|l| l.is_empty()) {
+        body.pop();
+    }
+    let value = if folded {
+        let mut out = String::new();
+        for (idx, l) in body.iter().enumerate() {
+            if l.is_empty() {
+                out.push('\n');
+            } else {
+                if idx != 0 && !body[idx - 1].is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(l);
+            }
+        }
+        out
+    } else {
+        body.join("\n")
+    };
+    (value, consumed)
 }
 
 #[cfg(test)]
@@ -217,6 +316,49 @@ Do the thing.
     }
 
     #[test]
+    fn later_roots_override_earlier_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let compat = tmp.path().join("agents").join("my-skill");
+        let native = tmp.path().join("sirbone").join("my-skill");
+        fs::create_dir_all(&compat).unwrap();
+        fs::create_dir_all(&native).unwrap();
+        fs::write(
+            compat.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: compat\n---\nbody",
+        )
+        .unwrap();
+        fs::write(
+            native.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: native\n---\nbody",
+        )
+        .unwrap();
+
+        let mut skills = Vec::new();
+        scan_dir(compat.parent().unwrap(), Scope::Global, &mut skills);
+        scan_dir(native.parent().unwrap(), Scope::Global, &mut skills);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "native");
+    }
+
+    #[test]
+    fn lowercase_skill_md_is_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("lowercase-skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("skill.md"),
+            "---\nname: lowercase-skill\ndescription: d\n---\nbody",
+        )
+        .unwrap();
+
+        let mut skills = Vec::new();
+        scan_dir(tmp.path(), Scope::Local, &mut skills);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "lowercase-skill");
+        assert_eq!(skills[0].path.file_name().unwrap(), "skill.md");
+    }
+
+    #[test]
     fn always_flag_parsed_from_frontmatter() {
         let tmp = tempfile::tempdir().unwrap();
         let on = tmp.path().join("auto-skill");
@@ -275,6 +417,52 @@ Do the thing.
         assert!(!path_globs_match(&tree, &meta.paths));
         fs::write(tree.join("src").join("main.rs"), "fn main() {}").unwrap();
         assert!(path_globs_match(&tree, &meta.paths));
+    }
+
+    #[test]
+    fn folded_block_scalar_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("folded");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: folded\ndescription: >-\n  one line.\n  second line.\nlicense: MIT\n---\nbody",
+        )
+        .unwrap();
+        let meta = scan_one(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(meta.name, "folded");
+        assert_eq!(meta.description, "one line. second line.");
+    }
+
+    #[test]
+    fn literal_block_scalar_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("lit");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: lit\ndescription: |-\n  keep\n  newlines\n---\nbody",
+        )
+        .unwrap();
+        let meta = scan_one(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(meta.description, "keep\nnewlines");
+    }
+
+    #[test]
+    fn block_scalar_ends_at_sibling_key() {
+        // Folded: blank line → newline; block must end at the less-indented
+        // `always:` sibling (not swallow it into the description).
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("blk");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: blk\ndescription: >-\n  para one.\n\n  para two.\nalways: true\n---\nbody",
+        )
+        .unwrap();
+        let meta = scan_one(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(meta.description, "para one.\npara two.");
+        assert!(meta.always);
     }
 
     #[test]

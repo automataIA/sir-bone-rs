@@ -6,14 +6,25 @@ use httpmock::{Method::GET, MockServer};
 use predicates::str::contains;
 
 fn bin() -> Command {
+    // A fake HOME shared by the whole suite: without it the binary loads the
+    // developer's real ~/.sirbone/.env (credentials, snapshots), and every
+    // "without provider key" assertion fails on a configured machine.
+    static FAKE_HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let home = FAKE_HOME.get_or_init(|| tempfile::tempdir().expect("create fake HOME"));
+
     let mut c = Command::cargo_bin("sirbone").unwrap();
     // Run away from the repo so dotenvy doesn't pick up a local .env, and strip
     // any provider keys from the inherited environment.
     let tmp = std::env::temp_dir();
     c.current_dir(tmp)
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path()) // Windows equivalent of HOME
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
-        .env_remove("OPENAI_API_KEY");
+        .env_remove("ANTHROPIC_BASE_URL")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_BASE_URL")
+        .env_remove("SIRBONE_MODEL");
     c
 }
 
@@ -169,5 +180,59 @@ fn missing_key_fails_cleanly() {
         .arg("do something")
         .assert()
         .failure()
-        .stderr(contains("no API key"));
+        .stderr(contains("no provider configured"));
+}
+
+#[test]
+fn setup_verification_non_tty_only_reports_and_never_writes() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("sirbone").unwrap();
+    command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env_remove("SIRBONE_PROJECT_STORE")
+        .arg("setup-verification")
+        .assert()
+        .success()
+        .stderr(contains("nessuna configurazione è stata scritta"));
+
+    assert!(
+        !home.path().join(".sirbone").exists(),
+        "non-interactive discovery must not create project state"
+    );
+}
+
+#[test]
+fn setup_verification_json_emits_sources_without_writing() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("sirbone").unwrap();
+    let output = command
+        .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("SIRBONE_ORACLE", "1")
+        .env_remove("SIRBONE_PROJECT_STORE")
+        .args(["setup-verification", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["candidates"][0]["source"], "Cargo.toml");
+    assert!(!home.path().join(".sirbone").exists());
 }

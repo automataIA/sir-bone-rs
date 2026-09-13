@@ -64,6 +64,7 @@ pub fn text_turn(text: &str) -> TurnResult {
         assistant_message: Message::assistant(text),
         state: AgentState::Done,
         usage: Default::default(),
+        tripped_rule: None,
     }
 }
 
@@ -72,6 +73,7 @@ pub fn tool_turn(id: &str, name: &str, args: serde_json::Value) -> TurnResult {
     TurnResult {
         assistant_message: Message {
             role: Role::Assistant,
+            injected: false,
             content: vec![ContentBlock::ToolUse {
                 id: id.into(),
                 name: name.into(),
@@ -84,6 +86,7 @@ pub fn tool_turn(id: &str, name: &str, args: serde_json::Value) -> TurnResult {
             arguments: args,
         }]),
         usage: Default::default(),
+        tripped_rule: None,
     }
 }
 
@@ -112,5 +115,8 @@ pub fn ctx(client: Arc<dyn LlmClient>, tools: ToolRegistry, events: EventTx) -> 
         max_steps: None,
         spend_cap: None,
         tokens_spent: 0,
+        stream_rules: Default::default(),
+        compacted_files: Vec::new(),
+        last_request: None,
     }
 }

@@ -315,3 +315,48 @@ async fn set_model_changes_the_request_model() {
     while rx.recv().await.is_some() {}
     mock.assert_async().await;
 }
+
+/// `temperature` rides in the body only when pinned: unset must leave the
+/// provider default in charge, not send an explicit value.
+async fn temperature_wire(temperature: Option<f32>, sent: bool) {
+    init_crypto();
+    let server = MockServer::start_async().await;
+    let mock = server
+        .mock_async(|when, then| {
+            let when = when.method(POST).path("/v1/messages");
+            if sent {
+                when.body_includes("\"temperature\":0.0");
+            } else {
+                when.body_excludes("temperature");
+            }
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse(&[r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}"#]));
+        })
+        .await;
+    let client =
+        AnthropicClient::new(&server.base_url(), "k", "claude-test").with_temperature(temperature);
+    let (tx, mut rx) = mpsc::channel(64);
+    let _ = client
+        .run_turn(
+            &[&Message::user("hi")],
+            &ToolRegistry::new(),
+            &tx,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    drop(tx);
+    while rx.recv().await.is_some() {}
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn temperature_sent_when_pinned() {
+    temperature_wire(Some(0.0), true).await;
+}
+
+#[tokio::test]
+async fn temperature_omitted_when_unset() {
+    temperature_wire(None, false).await;
+}

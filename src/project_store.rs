@@ -69,7 +69,8 @@ pub fn set_projects_root_override(dir: PathBuf) {
     let _ = PROJECTS_ROOT_OVERRIDE.set(dir);
 }
 
-fn projects_root() -> PathBuf {
+/// `~/.sirbone/projects/` — the per-project state root every slug hangs off.
+pub fn projects_root() -> PathBuf {
     if let Some(over) = PROJECTS_ROOT_OVERRIDE.get() {
         return over.clone();
     }
@@ -87,92 +88,6 @@ fn projects_root() -> PathBuf {
 /// `~/.sirbone/projects/<slug>/` for the given project root.
 pub fn project_dir(project: &Path) -> PathBuf {
     projects_root().join(project_slug(project))
-}
-
-/// Per-project agent memory log (`~/.sirbone/projects/<slug>/HISTORIA.md`).
-/// Model-authored, append-on-top changelog the agent reads on demand to recall
-/// past decisions across sessions.
-pub fn historia_path(project: &Path) -> PathBuf {
-    project_dir(project).join("HISTORIA.md")
-}
-
-/// Title + format legend written above the entries. Shared by the seed and the
-/// prepend path so a fresh log and a tool-created one carry the same header.
-const HISTORIA_HEADER: &str = "# HISTORIA\n\n\
-     Persistent memory of changes made in this project. Newest entry on top.\n\
-     Each entry: `## DD/MM/YYYY - HH:MM \u{2014} <title>` then bullets (what changed, files).\n";
-
-/// Seed `HISTORIA.md` with its title + format legend if it doesn't exist yet, so
-/// the agent's read-on-demand never misses and the entry format is authoritative.
-/// Only ever writes the scaffold header — entries stay model-authored. No-op if
-/// the file is already present.
-pub fn ensure_historia(project: &Path) -> Result<()> {
-    let path = historia_path(project);
-    if path.exists() {
-        return Ok(());
-    }
-    let dir = project_dir(project);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("cannot create project dir {}", dir.display()))?;
-    std::fs::write(&path, HISTORIA_HEADER)
-        .with_context(|| format!("cannot seed {}", path.display()))?;
-    Ok(())
-}
-
-/// Render one entry: a `## <stamp> \u{2014} <title>` heading followed by one bullet
-/// per line. `stamp` is the local time, already formatted as `DD/MM/YYYY - HH:MM`.
-fn render_historia_entry(stamp: &str, title: &str, bullets: &[String]) -> String {
-    let head = format!("## {stamp} \u{2014} {}\n", title.trim());
-    bullets
-        .iter()
-        .filter(|b| !b.trim().is_empty())
-        .map(|b| format!("- {}\n", b.trim()))
-        .fold(head, |mut acc, line| {
-            acc.push_str(&line);
-            acc
-        })
-}
-
-/// Prepend an entry into `HISTORIA.md` inside `dir`, newest-first: it lands after
-/// the header legend (everything before the first `## ` heading) and above any
-/// existing entries. Seeds the header if the file is absent. `stamp` is injected
-/// so the insertion logic is testable without a clock.
-fn prepend_historia_in(dir: &Path, stamp: &str, title: &str, bullets: &[String]) -> Result<()> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("cannot create project dir {}", dir.display()))?;
-    let path = dir.join("HISTORIA.md");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let existing = if existing.trim().is_empty() {
-        HISTORIA_HEADER.to_string()
-    } else {
-        existing
-    };
-    let entry = render_historia_entry(stamp, title, bullets);
-    let out = match existing.find("\n## ") {
-        // Insert above the first existing entry, keeping a blank line between them.
-        Some(i) => {
-            let (head, rest) = existing.split_at(i + 1);
-            format!("{head}{entry}\n{rest}")
-        }
-        // No entries yet — drop it under the legend with a blank line.
-        None => {
-            let sep = if existing.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            };
-            format!("{existing}{sep}{entry}")
-        }
-    };
-    std::fs::write(&path, out).with_context(|| format!("cannot write {}", path.display()))?;
-    Ok(())
-}
-
-/// Prepend a model-authored entry to this project's `HISTORIA.md`, stamped with the
-/// current local time (`DD/MM/YYYY - HH:MM`). Backs the `historia` tool.
-pub fn prepend_historia(project: &Path, title: &str, bullets: &[String]) -> Result<()> {
-    let stamp = chrono::Local::now().format("%d/%m/%Y - %H:%M").to_string();
-    prepend_historia_in(&project_dir(project), &stamp, title, bullets)
 }
 
 /// Result of [`link_config_into_repo`].
@@ -282,56 +197,6 @@ mod tests {
         assert_eq!(project_slug(Path::new("/home/dio/pi")), "-home-dio-pi");
         // dots and other separators also become dashes
         assert_eq!(project_slug(Path::new("/a/.b_c")), "-a--b-c");
-    }
-
-    #[test]
-    fn historia_path_lives_in_slug_dir() {
-        let p = historia_path(Path::new("/home/dio/pi"));
-        assert!(p.ends_with("-home-dio-pi/HISTORIA.md"), "{}", p.display());
-    }
-
-    #[test]
-    fn prepend_historia_seeds_then_stacks_newest_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("HISTORIA.md");
-
-        // First entry seeds the header and lands under the legend.
-        prepend_historia_in(dir.path(), "01/01/2026 - 09:00", "first", &["did A".into()]).unwrap();
-        let after_first = std::fs::read_to_string(&path).unwrap();
-        assert!(after_first.starts_with("# HISTORIA"), "header seeded");
-        assert!(after_first.contains("## 01/01/2026 - 09:00 \u{2014} first"));
-        assert!(after_first.contains("- did A"));
-
-        // Second entry goes ABOVE the first (newest-first), header still on top.
-        prepend_historia_in(
-            dir.path(),
-            "02/01/2026 - 10:30",
-            "second",
-            &["did B".into()],
-        )
-        .unwrap();
-        let after_second = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            after_second.starts_with("# HISTORIA"),
-            "header stays on top"
-        );
-        let i_second = after_second.find("\u{2014} second").unwrap();
-        let i_first = after_second.find("\u{2014} first").unwrap();
-        assert!(i_second < i_first, "newest entry precedes older one");
-        // Empty bullets are dropped.
-        prepend_historia_in(
-            dir.path(),
-            "03/01/2026 - 11:00",
-            "third",
-            &["".into(), " ".into()],
-        )
-        .unwrap();
-        let after_third = std::fs::read_to_string(&path).unwrap();
-        let block = &after_third[..after_third.find("\u{2014} second").unwrap()];
-        assert!(
-            !block.contains("\n- "),
-            "no empty bullet lines in newest block"
-        );
     }
 
     #[cfg(unix)]

@@ -20,6 +20,25 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
+/// Short content tag shown by `read` and echoed back in a hashline patch
+/// header. Same hash as the freshness stamp, narrowed to four hex digits: it
+/// only has to catch "this file is not the one you read", which the stamp
+/// already guards; the tag makes the mismatch visible to the model.
+pub fn tag_of(content: &str) -> String {
+    format!("{:04X}", hash_str(content) & 0xFFFF)
+}
+
+/// Per-line tag shown by `read` next to the line number and optionally quoted
+/// back in a patch address (`32#a7`). [`tag_of`] answers "is this the file you
+/// read?"; this answers the different question "is line 32 the line you meant?",
+/// which a whole-file tag cannot catch — the file can be untouched while the
+/// address is simply wrong. Two hex digits, lowercase so it never reads as a
+/// file tag: one line in 256 collides, which is a check the model can trip over
+/// by accident far less often than it miscounts a line.
+pub fn line_tag(line: &str) -> String {
+    format!("{:02x}", hash_str(line) & 0xFF)
+}
+
 impl ReadStamps {
     /// Record the content the agent has now seen for `path` (after a read, or
     /// after a successful write/edit so consecutive edits don't trip the guard).

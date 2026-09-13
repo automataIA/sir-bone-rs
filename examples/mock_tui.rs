@@ -22,12 +22,13 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
+use sirbone::agent::{Prompt, PromptKind};
 use sirbone::tui::{
     color_to_hex, ctx_usage_color, edit_diff_block, fmt_elapsed, fmt_tok, job_gauge, kb_combo,
-    kb_single, load_boar, md_to_lines, out_preview_rows, render_confirm_dialog,
+    kb_single, load_boar, md_to_lines, out_preview_rows, render_prompt_dialog,
     render_scroll_indicators, running_tool_block, thread_blank, thread_wrap, timeline_entry_lines,
     timeline_tree_parts, tool_box_row, tool_box_top, user_box, BoarAnim, BrailleWidget, Palette,
-    KB_PANEL_W, PALETTES, THREAD_GUTTER, TIMELINE_W, TIMELINE_W_MAX, TIMELINE_W_MIN,
+    PromptUi, KB_PANEL_W, PALETTES, THREAD_GUTTER, TIMELINE_W, TIMELINE_W_MAX, TIMELINE_W_MIN,
 };
 use sirbone::types::AgentEvent;
 
@@ -71,7 +72,6 @@ enum MockSettingsRow {
     Plan,
     Oracle,
     QuotaBar,
-    Architect,
     Thinking,
     Skills,
     Mcp,
@@ -81,7 +81,6 @@ const MOCK_SETTINGS_ROWS: &[MockSettingsRow] = &[
     MockSettingsRow::Plan,
     MockSettingsRow::Oracle,
     MockSettingsRow::QuotaBar,
-    MockSettingsRow::Architect,
     MockSettingsRow::Thinking,
     MockSettingsRow::Skills,
     MockSettingsRow::Mcp,
@@ -209,6 +208,30 @@ fn build_events() -> Vec<(u64, MockEv)> {
             result:
                 "crates/  playground/  Cargo.toml  Cargo.lock  README.md  CLAUDE.md  CHANGELOG.md"
                     .into(),
+        }),
+    );
+    // Todo checklist view (mirrors tui/app.rs `todo` special-case).
+    at(
+        15,
+        MockEv::Agent(AgentEvent::ToolCallStart {
+            id: String::new(),
+            name: "todo".into(),
+            input: serde_json::json!({ "todos": [
+                { "content": "Locate the AgentEvent definition", "status": "completed" },
+                { "content": "List variants with doc lines", "status": "in_progress" },
+                { "content": "Summarize renderer contract", "status": "pending" },
+            ]}),
+        }),
+    );
+    at(
+        10,
+        MockEv::Agent(AgentEvent::ToolCallEnd {
+            id: String::new(),
+            is_error: false,
+            name: "todo".into(),
+            result: "✔ Locate the AgentEvent definition\n❯ List variants with doc lines\n\
+                     ☐ Summarize renderer contract\n1/3 completed"
+                .into(),
         }),
     );
     at(
@@ -839,6 +862,7 @@ fn build_mock_kb_lines(p: &Palette) -> Vec<Line<'static>> {
         kb_single("↑ ↓", "Scroll output", p),
         kb_combo("Pg", "Up/Dn", "Fast scroll", p),
         kb_single("G", "Go to bottom (auto-scroll)", p),
+        kb_combo("Ctrl", "V", "Attach image from clipboard", p),
         kb_combo("Alt", "B", "Toggle timeline panel", p),
         kb_combo("Alt", "P", "Cycle palette", p),
         kb_combo("Alt", "A", "About", p),
@@ -902,8 +926,12 @@ struct MockApp {
     deferred: VecDeque<AgentEvent>,
     tail_cache: Option<(usize, usize, Vec<Line<'static>>)>,
     input: String,
+    // Mirrors tui/app.rs: images pasted with ^V wait here for the next turn.
+    // The sandbox has no session, so they land in a scratch dir under /tmp.
+    attachments: Vec<sirbone::attachments::Attachment>,
+    attach_dir: std::path::PathBuf,
     focus: Focus,
-    scroll: u16,
+    scroll: usize,
     auto_scroll: bool,
     spinner_tick: u64,
     busy: bool,
@@ -918,7 +946,6 @@ struct MockApp {
     settings_cursor: usize,
     picker: Option<MockPicker>,
     localize: bool,
-    architect_on: bool,
     thinking_budget: Option<u32>,
     ctx_pct: u8,
     spend_tokens: u64,      // mirrors tui: cumulative token spend (Feature C)
@@ -947,15 +974,15 @@ struct MockApp {
     trail_scroll: u16,
     trail_max_scroll: u16,
     hover_divider: bool,
-    scroll_to: Option<u16>,
+    scroll_to: Option<usize>,
     selected_entry: Option<usize>,
     popup: Option<MockPopup>,
     chat_area: Rect,
-    max_scroll: u16,
+    max_scroll: usize,
     palette_idx: usize,
     palette: &'static Palette,
     thread_active: bool,
-    confirm_request: Option<String>,
+    prompt: Option<PromptUi>,
     plan: bool,
     oracle: bool,
 }
@@ -975,6 +1002,8 @@ impl MockApp {
             deferred: VecDeque::new(),
             tail_cache: None,
             input: String::new(),
+            attachments: Vec::new(),
+            attach_dir: std::env::temp_dir().join("sirbone-mock-attachments"),
             focus: Focus::Input,
             scroll: 0,
             auto_scroll: true,
@@ -991,7 +1020,6 @@ impl MockApp {
             settings_cursor: 0,
             picker: None,
             localize: true,
-            architect_on: true,
             thinking_budget: None,
             // Demo values so the `tok N/M` indicator is visible in the sandbox.
             spend_tokens: 142_000,
@@ -1029,7 +1057,7 @@ impl MockApp {
             palette_idx: 0,
             palette: &PALETTES[0].1,
             thread_active: false,
-            confirm_request: None,
+            prompt: None,
             plan: false,
             oracle: false,
         }
@@ -1077,8 +1105,9 @@ impl MockApp {
         }
 
         // Pending approval: auto-dismiss after 2s in mock mode.
-        if let Some(req) = self.confirm_request.take() {
-            self.processed.push(MockEv::Confirm(req.leak()));
+        if let Some(ui) = self.prompt.take() {
+            let cmd = ui.prompt.detail.clone().unwrap_or_default();
+            self.processed.push(MockEv::Confirm(cmd.leak()));
         }
         // Run a queued command once the agent goes idle (mirrors tui.rs).
         if !self.busy {
@@ -1108,7 +1137,16 @@ impl MockApp {
             // Confirm is interactive-only: don't record it, or replay() (palette
             // switch, boar toggle) would re-open an already-answered dialog.
             if let MockEv::Confirm(cmd) = &ev {
-                self.confirm_request = Some(cmd.to_string());
+                let prompt = Prompt {
+                    title: "permission required".into(),
+                    detail: Some(cmd.to_string()),
+                    options: vec!["Allow once".into(), "Allow always".into(), "Deny".into()],
+                    allow_free_text: true,
+                    kind: PromptKind::Permission {
+                        suggested_glob: format!("Bash({cmd})"),
+                    },
+                };
+                self.prompt = Some(PromptUi::new(prompt));
                 break;
             }
             self.processed.push(ev.clone());
@@ -1551,6 +1589,22 @@ impl MockApp {
     /// User-invoked slash command (the `/name` path). `/commit-helper` injects
     /// the demo skill's full body — the same body the model loads via the
     /// `load_skill` tool in the scripted turn.
+    /// ^V — mirrors `App::attach_from_clipboard` in tui/app.rs.
+    fn attach_from_clipboard(&mut self) {
+        let label = format!("image_{}", self.attachments.len() + 1);
+        let line = match sirbone::attachments::from_clipboard(&self.attach_dir, label) {
+            Ok(att) => {
+                let msg = format!("  📎 {}", att.describe());
+                self.attachments.push(att);
+                msg
+            }
+            Err(e) => format!("  clipboard: {e}"),
+        };
+        let style = st(self.palette.accent, false);
+        self.lines.push(Line::from(Span::styled(line, style)));
+        self.auto_scroll = true;
+    }
+
     fn exec_slash(&mut self, cmd: &str) {
         let p = self.palette;
         let name = cmd.split_whitespace().next().unwrap_or("");
@@ -1678,9 +1732,8 @@ impl MockApp {
             tail.extend(thread_wrap(blk, true, p));
         }
         let total_n = self.lines.len() + tail.len();
-        let total = total_n as u16;
-        let viewport = chat_area.height.saturating_sub(2);
-        let max_scroll = total.saturating_sub(viewport);
+        let viewport = chat_area.height.saturating_sub(2) as usize;
+        let max_scroll = total_n.saturating_sub(viewport);
         self.max_scroll = max_scroll;
         // Keep self.scroll in sync with the screen (mirrors tui.rs). A trail-click
         // jump (`scroll_to`) pins its target to the top, past max_scroll.
@@ -1693,8 +1746,8 @@ impl MockApp {
             self.scroll.min(max_scroll)
         };
         let scroll = self.scroll;
-        let start = scroll as usize;
-        let end = (start + viewport as usize).min(total_n);
+        let start = scroll;
+        let end = (start + viewport).min(total_n);
         let visible: Vec<Line<'static>> = (start..end)
             .map(|i| {
                 if i < self.lines.len() {
@@ -1820,8 +1873,8 @@ impl MockApp {
 
         self.render_info_bar(f, info_area);
         self.render_popup(f);
-        if let Some(cmd) = &self.confirm_request {
-            render_confirm_dialog(f, cmd, self.palette);
+        if let Some(ui) = &self.prompt {
+            render_prompt_dialog(f, ui, self.palette);
         }
         if self.show_logs {
             self.render_logs(f);
@@ -1883,11 +1936,9 @@ impl MockApp {
 
         let rows = inner.height as usize;
         let w = inner.width as usize;
-        let selected = self.selected_entry.or_else(|| {
-            self.timeline
-                .iter()
-                .rposition(|e| e.target <= self.scroll as usize)
-        });
+        let selected = self
+            .selected_entry
+            .or_else(|| self.timeline.iter().rposition(|e| e.target <= self.scroll));
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut owners: Vec<usize> = Vec::new();
@@ -2200,7 +2251,7 @@ impl MockApp {
             None => "off".to_string(),
             Some(b) => format!("{}k", b / 1000),
         };
-        let rows: [(String, &str); 8] = [
+        let rows: [(String, &str); 7] = [
             (
                 format!("Localize pre-pass:  {}", on(self.localize)),
                 "Run the localization pre-pass before each turn.",
@@ -2216,10 +2267,6 @@ impl MockApp {
             (
                 format!("Quota window bar:  {}", on(self.quota_bar)),
                 "Show the estimated 5-hour quota window (start→end) in the info bar.",
-            ),
-            (
-                format!("Architect:  {}", on(self.architect_on)),
-                "Consult a second model for a design opinion each turn.",
             ),
             (
                 format!("Thinking budget:  {think}"),
@@ -2310,7 +2357,7 @@ fn handle_mouse(app: &mut MockApp, mouse: MouseEvent) {
             {
                 if let Some(&idx) = app.timeline_rows.get((mouse.row - ta.y) as usize) {
                     if let Some(entry) = app.timeline.get(idx) {
-                        app.scroll_to = Some(entry.target as u16);
+                        app.scroll_to = Some(entry.target);
                         app.selected_entry = Some(idx);
                     }
                 }
@@ -2323,7 +2370,7 @@ fn handle_mouse(app: &mut MockApp, mouse: MouseEvent) {
                 && mouse.column > ca.x
                 && mouse.column < ca.x + ca.width - 1
             {
-                let content_row = (mouse.row - ca.y - 1) as usize + app.scroll as usize;
+                let content_row = (mouse.row - ca.y - 1) as usize + app.scroll;
                 if let Some(idx) = app
                     .tool_boxes
                     .iter()
@@ -2416,7 +2463,12 @@ fn main() -> anyhow::Result<()> {
         recording,
     );
     disable_raw_mode()?;
-    execute!(io::stdout(), Show, DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        io::stdout(),
+        Show,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     result
 }
 
@@ -2483,7 +2535,6 @@ fn run(
                             MockSettingsRow::Plan => app.plan = !app.plan,
                             MockSettingsRow::Oracle => app.oracle = !app.oracle,
                             MockSettingsRow::QuotaBar => app.quota_bar = !app.quota_bar,
-                            MockSettingsRow::Architect => app.architect_on = !app.architect_on,
                             MockSettingsRow::Thinking => {
                                 app.thinking_budget = if fwd {
                                     match app.thinking_budget {
@@ -2537,15 +2588,22 @@ fn run(
                             _ => {}
                         }
                     } else {
-                        // ── confirm dialog intercept ──────────────────────
-                        if app.confirm_request.is_some() {
+                        // ── prompt dialog intercept ───────────────────────
+                        if let Some(ui) = &mut app.prompt {
                             match key.code {
-                                KeyCode::Char('y')
-                                | KeyCode::Char('Y')
-                                | KeyCode::Char('n')
-                                | KeyCode::Char('N')
-                                | KeyCode::Esc => {
-                                    app.confirm_request = None;
+                                KeyCode::Char(c) if ui.editing => ui.push_char(c),
+                                KeyCode::Backspace if ui.editing => ui.backspace(),
+                                KeyCode::Esc if ui.editing => ui.editing = false,
+                                KeyCode::Enter if ui.editing => {
+                                    app.prompt = None;
+                                }
+                                KeyCode::Up => ui.up(),
+                                KeyCode::Down => ui.down(),
+                                KeyCode::Char('e') => {
+                                    ui.begin_edit();
+                                }
+                                KeyCode::Enter | KeyCode::Esc => {
+                                    app.prompt = None;
                                 }
                                 _ => {}
                             }
@@ -2589,6 +2647,11 @@ fn run(
                                 (KeyCode::Char('s'), _) if alt => {
                                     app.settings_mode = true;
                                     app.picker = None;
+                                }
+                                (KeyCode::Char('v'), _)
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    app.attach_from_clipboard();
                                 }
                                 (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
                                     app.focus = if app.focus == Focus::Input {
@@ -2648,6 +2711,10 @@ fn run(
                                         app.queued_input = Some(text);
                                     } else if let Some(cmd) = text.strip_prefix('/') {
                                         app.exec_slash(cmd);
+                                    } else {
+                                        // Same lifecycle as the real TUI: a submitted
+                                        // turn consumes the staged images.
+                                        app.attachments.clear();
                                     }
                                 }
                                 _ => {}

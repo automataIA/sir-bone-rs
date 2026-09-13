@@ -49,13 +49,65 @@ impl TypedTool for EditTool {
 
         self.stamps.guard(&input.path, &content).await?;
 
-        let new_content = apply_edit(&content, &input.old_string, &input.new_string)
-            .with_context(|| format!("in {}", input.path))?;
+        let new_content = match apply_edit(&content, &input.old_string, &input.new_string) {
+            Ok(c) => c,
+            // A not-found failure normally costs the model a re-read turn; the
+            // nearest-match hint (opt-in while under evaluation) lets it re-quote
+            // from the error alone.
+            Err(e) if hint_enabled() && e.to_string().contains("not found") => {
+                let hint = nearest_match(&content, &input.old_string)
+                    .map(|h| format!("\n{h}"))
+                    .unwrap_or_default();
+                bail!("{e} in {}{hint}", input.path);
+            }
+            Err(e) => return Err(e.context(format!("in {}", input.path))),
+        };
 
         let result = commit_edit(&self.undo, &input.path, &content, &new_content).await?;
         self.stamps.record(&input.path, &new_content).await;
         Ok(result)
     }
+}
+
+// Default ON: the hint only fires where the model previously got a bare
+// "not found" (strictly more information), is deterministic, and edit failures
+// are too rare on ACB (~0.03/task) for an arm to measure — opt-out to A/B.
+fn hint_enabled() -> bool {
+    std::env::var("SIRBONE_NO_EDIT_HINT").is_err()
+}
+
+/// Deterministic nearest-match hint for a failed `old_string` lookup: the most
+/// similar line window of the same height, with line numbers, so the model can
+/// re-quote verbatim without spending a re-read turn. `None` when nothing in
+/// the file is close enough to help.
+fn nearest_match(content: &str, old: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let n = old.lines().count().max(1);
+    // The char-diff scan is O(lines × old); a failure path is rare, but keep a
+    // ceiling so a pathological file can't stall the tool.
+    if lines.is_empty() || lines.len() > 10_000 || lines.len() < n {
+        return None;
+    }
+    let (mut best, mut best_ratio) = (0usize, 0f32);
+    for start in 0..=lines.len() - n {
+        let window = lines[start..start + n].join("\n");
+        let ratio = TextDiff::from_chars(old.trim(), window.trim()).ratio();
+        if ratio > best_ratio {
+            (best, best_ratio) = (start, ratio);
+        }
+    }
+    (best_ratio >= 0.6).then(|| {
+        let numbered: String = lines[best..best + n]
+            .iter()
+            .enumerate()
+            .map(|(i, l)| format!("{:>5} | {l}\n", best + i + 1))
+            .collect();
+        format!(
+            "closest match ({:.0}% similar) at line {} — re-quote old_string from it verbatim:\n{numbered}",
+            best_ratio * 100.0,
+            best + 1
+        )
+    })
 }
 
 /// Multi-pass replacement: exact substring first, then line-window matching that
@@ -374,6 +426,28 @@ mod tests {
     fn apply_edit_not_found_errors() {
         let err = apply_edit("a\nb\n", "zzz", "y").unwrap_err().to_string();
         assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn nearest_match_finds_misquoted_window() {
+        let content = "fn main() {\n    let count = compute(x);\n    print(count);\n}\n";
+        // Model misquoted `compute(x)` as `compute(y)`.
+        let hint = nearest_match(content, "let count = compute(y);").unwrap();
+        assert!(hint.contains("at line 2"), "{hint}");
+        assert!(hint.contains("compute(x)"), "{hint}");
+    }
+
+    #[test]
+    fn nearest_match_multiline_window_numbers() {
+        let content = "a\nb\nfoo1\nbar2\nc\n";
+        let hint = nearest_match(content, "foo1\nbar3").unwrap();
+        assert!(hint.contains("at line 3"), "{hint}");
+        assert!(hint.contains("    4 | bar2"), "{hint}");
+    }
+
+    #[test]
+    fn nearest_match_none_when_nothing_similar() {
+        assert!(nearest_match("alpha\nbeta\n", "zzzzqqqq").is_none());
     }
 
     #[test]

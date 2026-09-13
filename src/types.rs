@@ -55,6 +55,18 @@ pub enum ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    /// True when this message was written by sirbone itself rather than by the
+    /// human: oracle retries, stop-hook reasons, stuck nudges, stream-rule
+    /// reminders. They all have to travel as `Role::User` because that is the
+    /// only channel the providers give us, which makes the role alone useless
+    /// for telling "a new turn started" from "the machine spoke mid-turn".
+    /// Anything that needs a *turn* boundary (compaction) must ask this, not
+    /// pattern-match the text.
+    ///
+    /// Not sent to any provider; `#[serde(default)]` so sessions written before
+    /// the flag existed still load (as human messages, which is what they were).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub injected: bool,
 }
 
 impl Message {
@@ -62,12 +74,27 @@ impl Message {
         Self {
             role: Role::User,
             content: vec![ContentBlock::Text { text: text.into() }],
+            injected: false,
         }
+    }
+
+    /// A user-role message sirbone wrote for itself — see [`Message::injected`].
+    pub fn injected(text: impl Into<String>) -> Self {
+        Self {
+            injected: true,
+            ..Self::user(text)
+        }
+    }
+
+    /// True when this message opens a new human turn.
+    pub fn is_turn_start(&self) -> bool {
+        self.role == Role::User && !self.injected
     }
 
     pub fn system(text: impl Into<String>) -> Self {
         Self {
             role: Role::System,
+            injected: false,
             content: vec![ContentBlock::Text { text: text.into() }],
         }
     }
@@ -75,6 +102,7 @@ impl Message {
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
+            injected: false,
             content: vec![ContentBlock::Text { text: text.into() }],
         }
     }
@@ -82,6 +110,7 @@ impl Message {
     pub fn assistant_with_tools(tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
+            injected: false,
             content: tool_calls
                 .into_iter()
                 .map(|tc| ContentBlock::ToolUse {
@@ -100,6 +129,7 @@ impl Message {
     ) -> Self {
         Self {
             role: Role::Tool,
+            injected: false,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.into(),
                 content: content.into(),
@@ -160,6 +190,9 @@ pub enum AgentEvent {
         used_tokens: u32,
         context_window: u32,
         cached_tokens: u32,
+        /// Completion/reasoning tokens reported for this model call. Providers
+        /// that have not emitted final usage yet send zero.
+        output_tokens: u32,
     },
     /// Context was compacted; carries the full post-compaction transcript
     /// (summary + ack + kept recent messages) so consumers can persist it.
@@ -283,8 +316,16 @@ mod tests {
             Just(Role::Assistant),
             Just(Role::Tool),
         ];
-        (role, proptest::collection::vec(arb_block(), 0..5))
-            .prop_map(|(role, content)| Message { role, content })
+        (
+            role,
+            proptest::collection::vec(arb_block(), 0..5),
+            any::<bool>(),
+        )
+            .prop_map(|(role, content, injected)| Message {
+                role,
+                content,
+                injected,
+            })
     }
 
     proptest! {
@@ -374,6 +415,7 @@ mod tests {
     fn message_serde_round_trip() {
         let msg = Message {
             role: Role::Assistant,
+            injected: false,
             content: vec![ContentBlock::Text { text: "hi".into() }],
         };
         let json = serde_json::to_string(&msg).unwrap();

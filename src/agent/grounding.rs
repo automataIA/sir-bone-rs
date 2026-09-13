@@ -184,7 +184,9 @@ pub fn facts(root: &Path, draft: &str) -> Vec<String> {
     for (n, tok) in &refs.counts {
         let actual = structure::count_occurrences(root, tok);
         if actual != *n {
-            out.push(format!("`{tok}` occurs {actual} times in the project (you wrote {n})"));
+            out.push(format!(
+                "`{tok}` occurs {actual} times in the project (you wrote {n})"
+            ));
         }
     }
 
@@ -216,12 +218,12 @@ pub fn prompt_context(root: &Path, prompt: &str) -> Option<String> {
             .files
             .iter()
             .filter_map(|(path, cache)| {
-                cache
-                    .data
-                    .defs
-                    .iter()
-                    .position(|d| d == s)
-                    .map(|i| (path.clone(), cache.data.sigs.get(i).cloned().unwrap_or_default()))
+                cache.data.defs.iter().position(|d| d == s).map(|i| {
+                    (
+                        path.clone(),
+                        cache.data.sigs.get(i).cloned().unwrap_or_default(),
+                    )
+                })
             })
             .collect();
         hits.sort();
@@ -309,7 +311,7 @@ mod tests {
         assert!(!r.paths.iter().any(|p| p.contains('*'))); // glob
         assert!(!r.paths.iter().any(|p| p.contains("http"))); // URL
         assert!(!r.paths.iter().any(|p| p.contains(' '))); // compound span
-        // range suffix stripped to the bare path (resolves to the real file)
+                                                           // range suffix stripped to the bare path (resolves to the real file)
         assert!(r.paths.contains(&"src/lib.rs".to_string()));
     }
 
@@ -328,16 +330,26 @@ mod tests {
                      We also use `HashMap`.";
         let f = facts(root, draft);
         // missing path -> neutral fact (harmless: it's a to-create file)
-        assert!(f.iter().any(|x| x.contains("`src/new.rs` is not a current file")));
+        assert!(f
+            .iter()
+            .any(|x| x.contains("`src/new.rs` is not a current file")));
         // existing-symbol -> authoritative location (NOT an accusation)
-        assert!(f.iter().any(|x| x.contains("`validate` is defined in src/lib.rs")));
-        assert!(f.iter().any(|x| x.contains("`Config` is defined in src/lib.rs")));
+        assert!(f
+            .iter()
+            .any(|x| x.contains("`validate` is defined in src/lib.rs")));
+        assert!(f
+            .iter()
+            .any(|x| x.contains("`Config` is defined in src/lib.rs")));
         // wrong count -> real number
-        assert!(f.iter().any(|x| x.contains("`unwrap` occurs 3 times") && x.contains("99")));
+        assert!(f
+            .iter()
+            .any(|x| x.contains("`unwrap` occurs 3 times") && x.contains("99")));
         // external symbol -> NO fact (no noise, no wrong fact)
         assert!(!f.iter().any(|x| x.contains("`HashMap`")));
         // an existing path is not noise
-        assert!(!f.iter().any(|x| x.contains("`src/lib.rs` is not a current file")));
+        assert!(!f
+            .iter()
+            .any(|x| x.contains("`src/lib.rs` is not a current file")));
         // every emitted line is a true statement about the fixture
         assert!(facts_block(&f).is_some());
     }
@@ -370,8 +382,14 @@ mod tests {
         std::fs::write(root.join("b/mod.rs"), "pub fn y() {}").unwrap();
         let f = facts(root, "Edit `mod.rs`, and create `truly_absent.rs`.");
         // `mod.rs` exists (ambiguously) -> NOT flagged as missing (was misleading)
-        assert!(!f.iter().any(|x| x.contains("`mod.rs` is not a current file")), "{f:?}");
+        assert!(
+            !f.iter()
+                .any(|x| x.contains("`mod.rs` is not a current file")),
+            "{f:?}"
+        );
         // a genuinely absent file is still flagged
-        assert!(f.iter().any(|x| x.contains("`truly_absent.rs` is not a current file")));
+        assert!(f
+            .iter()
+            .any(|x| x.contains("`truly_absent.rs` is not a current file")));
     }
 }

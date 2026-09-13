@@ -12,7 +12,7 @@ use super::{
     markdown::md_to_lines,
     theme::{ctx_usage_color, styled, PALETTES},
     widgets::{
-        build_kb_lines, fmt_elapsed, fmt_tok, job_gauge, render_confirm_dialog,
+        build_kb_lines, fmt_elapsed, fmt_tok, job_gauge, render_prompt_dialog,
         render_scroll_indicators, running_tool_block, thread_blank, thread_wrap,
         timeline_entry_lines, timeline_tree_parts, KB_PANEL_W, THREAD_GUTTER,
     },
@@ -112,9 +112,8 @@ impl App {
         }
 
         let total_n = self.lines.len() + tail.len();
-        let total = total_n.min(u16::MAX as usize) as u16;
-        let viewport = chat_area.height.saturating_sub(2);
-        let max_scroll = total.saturating_sub(viewport);
+        let viewport = chat_area.height.saturating_sub(2) as usize;
+        let max_scroll = total_n.saturating_sub(viewport);
         self.max_scroll = max_scroll;
         // Keep self.scroll in sync with what's on screen so mouse hit-testing
         // and the first ↑ after auto-scroll start from the visible position.
@@ -131,8 +130,8 @@ impl App {
         };
         let scroll = self.scroll;
         // Clone only the visible window — scrolling a long chat stays cheap.
-        let start = scroll as usize;
-        let end = (start + viewport as usize).min(total_n);
+        let start = scroll;
+        let end = (start + viewport).min(total_n);
         let visible: Vec<Line<'static>> = (start..end)
             .map(|i| {
                 if i < self.lines.len() {
@@ -292,8 +291,8 @@ impl App {
 
         self.render_info_bar(f, info_area);
         self.render_popup(f);
-        if let Some(cmd) = &self.confirm_request {
-            render_confirm_dialog(f, cmd, self.palette);
+        if let Some(ui) = &self.prompt {
+            render_prompt_dialog(f, ui, self.palette);
         }
         if self.show_logs {
             self.render_logs(f);
@@ -360,11 +359,9 @@ impl App {
         let w = inner.width as usize;
         // Highlight the clicked entry if any (it may sit below the reachable
         // scroll), else auto-follow the chat: greatest target at/above the top.
-        let selected = self.selected_entry.or_else(|| {
-            self.timeline
-                .iter()
-                .rposition(|e| e.target <= self.scroll as usize)
-        });
+        let selected = self
+            .selected_entry
+            .or_else(|| self.timeline.iter().rposition(|e| e.target <= self.scroll));
 
         // Build every entry's wrapped lines (chronological) so the panel can
         // scroll back through history, not just show what fits vertically.
@@ -510,8 +507,13 @@ impl App {
         }
         // Estimated 5-hour quota-window span (start→end), before the theme label.
         if let Some((from, to)) = self.quota_window_clocks() {
+            // On GLM/z.ai the provider reports the real pool: show what is left.
+            let left = self
+                .quota_window
+                .and_then(|w| w.used_pct)
+                .map_or(String::new(), |used| format!(" {}% left", 100 - used));
             spans.push(Span::styled(
-                format!("  ·  win {from}→{to}"),
+                format!("  ·  win {from}→{to}{left}"),
                 styled(p.muted, false),
             ));
         }
@@ -619,22 +621,26 @@ impl App {
 
         let on = |b: bool| if b { "ON" } else { "OFF" };
         let cur = self.settings_cursor;
-        let arch = match &self.architect {
-            Some(g) => {
-                if g.load(std::sync::atomic::Ordering::Relaxed) {
-                    "ON"
-                } else {
-                    "OFF"
-                }
-            }
-            None => "not configured",
-        };
+        // GLM models get the dial translated by the clients into z.ai reasoning
+        // effort — show the level the model will actually run at, not raw tokens.
+        let glm = crate::ai::is_glm("", &self.model);
         let think = match self.thinking_budget {
             None => "off".to_string(),
             Some(b) => format!("{}k", b / 1000),
         };
+        let (think_label, think_help) = if glm {
+            (
+                format!("Thinking (GLM effort):  {}", crate::ai::glm_effort_label(self.thinking_budget)),
+                "z.ai reasoning effort — cycle light / low / medium / max. No full off: disabled still thinks lightly.",
+            )
+        } else {
+            (
+                format!("Thinking budget:  {think}"),
+                "Extended-thinking token budget — cycle off / 8k / 16k / 32k.",
+            )
+        };
         // One per SETTINGS_ROWS entry, in order: (label, help shown when focused).
-        let rows: [(String, &str); 8] = [
+        let rows: [(String, &str); 7] = [
             (
                 format!("Localize pre-pass:  {}", on(self.localize)),
                 "Run the localization pre-pass before each turn.",
@@ -651,14 +657,7 @@ impl App {
                 format!("Quota window bar:  {}", on(self.quota_bar)),
                 "Show the estimated 5-hour quota window (start→end) in the info bar.",
             ),
-            (
-                format!("Architect:  {arch}"),
-                "Consult a second model for a design opinion each turn.",
-            ),
-            (
-                format!("Thinking budget:  {think}"),
-                "Extended-thinking token budget — cycle off / 8k / 16k / 32k.",
-            ),
+            (think_label, think_help),
             (
                 "Skills".to_string(),
                 "Choose which skills load for this project.",
@@ -710,7 +709,7 @@ impl App {
         let (title, empty_hint) = match picker.kind {
             PickerKind::Skills => (
                 " settings · skills ",
-                "  no skills found in ~/.sirbone/skills or .sirbone/skills",
+                "  no skills found in .sirbone/skills, ~/.sirbone/skills, .agents/skills, or ~/.agents/skills",
             ),
             PickerKind::Mcp => (
                 " settings · mcp ",

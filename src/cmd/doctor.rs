@@ -61,10 +61,10 @@ fn doctor_line(ok: bool, msg: impl AsRef<str>) {
     println!("{} {}", if ok { "ok" } else { "WARN" }, msg.as_ref());
 }
 
-pub async fn run_doctor(cwd: &Path, cli: &Cli) -> Result<()> {
+pub async fn run_doctor(cwd: &Path, cli: &Cli, system_prompt_chars: usize) -> Result<()> {
     println!("Sir Bone doctor");
     println!("cwd: {}", cwd.display());
-    println!("version: {}", env!("CARGO_PKG_VERSION"));
+    println!("version: {}", sirbone::VERSION);
 
     let mut warnings = 0usize;
     let mut check = |ok: bool, msg: String| {
@@ -75,13 +75,44 @@ pub async fn run_doctor(cwd: &Path, cli: &Cli) -> Result<()> {
     };
 
     let (provider, has_key, base) = provider_env(cli);
+    // Flag a redirected base URL instead of printing it like any other setting:
+    // pointing it at another host sends the API key there, and the failure mode
+    // of that class of bug (CVE-2026-21852) is that nobody notices. Not a warning
+    // — third-party endpoints (z.ai, Groq, Ollama) are a supported setup.
+    let default_base = if provider == "anthropic" {
+        "https://api.anthropic.com"
+    } else {
+        "https://api.openai.com/v1"
+    };
+    let base_note = if base == default_base {
+        String::new()
+    } else {
+        " (non-default — the API key is sent here)".into()
+    };
     check(
         has_key,
         if has_key {
-            format!("provider: {provider} key present, base {base}")
+            format!("provider: {provider} key present, base {base}{base_note}")
         } else {
             format!("provider: no API key found for {provider}; set ANTHROPIC_AUTH_TOKEN or OPENAI_API_KEY")
         },
+    );
+    // Prompt weight, for the ablation loop: what the model reads before the first
+    // user token. `SIRBONE_DISABLE=prompt:*` prices the naked baseline.
+    check(
+        true,
+        format!(
+            "system prompt: {} chars (~{} tokens){}",
+            system_prompt_chars,
+            system_prompt_chars / 4,
+            // Set-but-empty disables nothing (see `ablate::disabled`), so it must
+            // not claim an ablated prompt — that misreads a whole A/B arm.
+            if std::env::var("SIRBONE_DISABLE").is_ok_and(|v| !v.trim().is_empty()) {
+                " — ablated by SIRBONE_DISABLE"
+            } else {
+                ""
+            }
+        ),
     );
 
     let model = cli
@@ -152,20 +183,78 @@ pub async fn run_doctor(cwd: &Path, cli: &Cli) -> Result<()> {
         },
     );
 
-    let tools = make_tools(cwd);
-    let native_tools = tools
-        .iter()
-        .filter(|t| !t.name().starts_with("mcp__"))
-        .count();
-    check(true, format!("native tools registered: {native_tools}"));
+    let tools = make_tools(cwd, true);
+    let (native_tools, native_schema_tokens) = tools.native_schema_cost();
+    check(
+        true,
+        format!("native tools registered: {native_tools} (~{native_schema_tokens} schema tokens)"),
+    );
+    // `ask_user` and `todo` need a front-end, so a headless run carries fewer.
+    let (headless_tools, headless_tokens) = make_tools(cwd, false).native_schema_cost();
+    check(
+        true,
+        format!("headless run: {headless_tools} tools (~{headless_tokens} schema tokens)"),
+    );
+    // Per-tool ranking: the schema rides in the cached prefix every turn, so this
+    // is the always-on cost of the tool surface. Deciding which tools are worth
+    // an A/B starts here — cheap ones are not worth the quota whatever they do.
+    for (name, tok) in tools.schema_ranking() {
+        println!("   {tok:>5} tok  {name}");
+    }
+
+    let search2md = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::process::Command::new("search2md")
+            .arg("--version")
+            .output(),
+    )
+    .await;
+    match search2md {
+        Ok(Ok(output)) if output.status.success() => check(
+            true,
+            format!(
+                "search2md: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            ),
+        ),
+        Ok(Ok(output)) => check(
+            false,
+            format!("search2md: --version exited with {}", output.status),
+        ),
+        Ok(Err(_)) => check(
+            false,
+            "search2md: missing from PATH (required by web_search)".into(),
+        ),
+        Err(_) => check(false, "search2md: --version timed out".into()),
+    }
 
     let hooks = sirbone::config::section("hooks");
+    let (hook_presets, unknown_hook_presets) = sirbone::checks::configured_presets(hooks.as_ref());
     check(
         hooks.as_ref().map(|v| v.is_object()).unwrap_or(true),
         if hooks.is_some() {
-            "hooks: configured".into()
+            let active = hook_presets
+                .iter()
+                .map(|preset| preset.name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "hooks: configured; presets: {}",
+                if active.is_empty() { "none" } else { &active }
+            )
         } else {
             "hooks: not configured".into()
+        },
+    );
+    check(
+        unknown_hook_presets.is_empty(),
+        if unknown_hook_presets.is_empty() {
+            "hook presets: all names recognized".into()
+        } else {
+            format!(
+                "hook presets: unknown name(s): {}",
+                unknown_hook_presets.join(", ")
+            )
         },
     );
     match sirbone::config::spend_cap() {
@@ -173,8 +262,24 @@ pub async fn run_doctor(cwd: &Path, cli: &Cli) -> Result<()> {
         None => check(true, "spend cap: disabled".into()),
     }
 
-    let skills = sirbone::skills::scan_skills();
-    check(true, format!("skills discovered: {}", skills.len()));
+    // Distinguish on-disk from enabled: a SKILL.md dropped in a supported skills
+    // root is invisible until listed in the project config's `skills.enabled`.
+    let on_disk = sirbone::skills::scan_all_skills();
+    let enabled = sirbone::skills::scan_skills();
+    let dormant = !on_disk.is_empty() && enabled.is_empty();
+    check(
+        !dormant,
+        format!(
+            "skills: {} on disk, {} enabled{}",
+            on_disk.len(),
+            enabled.len(),
+            if dormant {
+                " — add names to skills.enabled in the project config"
+            } else {
+                ""
+            }
+        ),
+    );
 
     if cli.doctor_network {
         if has_key {
@@ -217,6 +322,7 @@ pub async fn run_doctor(cwd: &Path, cli: &Cli) -> Result<()> {
             let probe = [
                 Message {
                     role: sirbone::Role::System,
+                    injected: false,
                     content: vec![ContentBlock::Text {
                         text: "You are a token-counting probe.".into(),
                     }],

@@ -29,22 +29,24 @@ workspace. File-mutating tools build on it, so you can undo a whole run's change
 The `undo` tool reverts the most recent single mutation, while `/rollback` restores an
 entire snapshot — your safety net when an automated edit goes wrong.
 
-## Project memory (`HISTORIA.md`)
+## Algorithmic project memory (`historia`)
 
-Each project gets a persistent, human-readable memory log at
-`~/.sirbone/projects/<slug>/HISTORIA.md` — kept **outside** your repository, next to the
-other per-project state (`meta.json`, `sessions/`, snapshots). It's seeded with a header
-the first time Sir Bone runs in the project.
+The `historia` tool reconstructs project memory on demand from every JSONL session under
+`~/.sirbone/projects/<slug>/sessions/`. The JSONL schema is interpreted structurally: human
+requests, assistant answers, plans, mutated paths, tool failures, and run status are distinct
+search fields. Thinking, images, successful tool output, injected control messages, duplicate
+compaction tails, and compaction boilerplate are removed deterministically.
 
-After the agent changes project files it prepends a timestamped entry, newest first:
+An empty query returns recent project state. A query can be restricted to requests, assistant
+answers, plans, files, problems, or status; an unrestricted search weights requests and plans
+above incidental path/error matches. Results are bounded and newest-first after relevance, so
+recalling context does not inject every raw transcript into the model context.
 
-```markdown
-## 21/06/2026 - 11:45 — Switch greeting to "hello"
-- Changed the printed string in `main.rs`
-```
+This memory is read-only: the chat sessions remain the single source of truth, and no LLM-authored
+`HISTORIA.md` entry is required. Ask the agent what happened, why a solution was chosen, or to
+continue an earlier plan and it will call `historia` explicitly.
 
-The agent reads this file back when starting work that depends on earlier decisions, so
-it carries context across sessions — and because it's plain markdown, you can read or
-edit it by hand. The agent is told to maintain it through its system prompt, so how
-consistently entries get written depends on the model driving the session.
-
+Use `/historia` to continue from the latest relevant state, or add a date/topic such as
+`/historia 2026-08-10 compaction`. The command runs the structured lookup before the model turn and
+supplies its result with an explicit continuation contract: inspect the current workspace, resume
+unfinished plans, reuse solutions that worked, and avoid repeating documented failed attempts.

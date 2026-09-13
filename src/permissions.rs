@@ -15,6 +15,23 @@ pub enum Decision {
     Deny(String),
 }
 
+/// What the policy wants done to an allowed call *besides* letting it run.
+///
+/// Kept separate from [`Decision`] because it is orthogonal: the decision says
+/// whether the call is permitted, this says what the call turns out to be. Both
+/// producers are deterministic-first — a `pre_tool_use` hook — with the LLM
+/// classifier's `updatedInput` folded into the same channel.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum PreAction {
+    /// Run the call as the model wrote it.
+    #[default]
+    AsIs,
+    /// Merge this JSON object into the tool input first (`updatedInput`).
+    Rewrite(serde_json::Value),
+    /// Do not run the tool at all; this is the result to hand back.
+    Short(String),
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PermissionConfig {
     /// Glob patterns auto-approved without prompting, e.g. `Bash(cargo test)`.
@@ -32,6 +49,52 @@ pub struct PermissionConfig {
     /// Populated by `load`, not deserialized from the `permissions` object.
     #[serde(skip)]
     pub mcp_trust: std::collections::HashMap<String, bool>,
+    /// Review-only run: the model reads and reports, but has no authority to
+    /// change anything. A per-run mode set by `--review-only`, not a stored
+    /// policy — hence `skip` rather than a config key.
+    #[serde(skip)]
+    pub review_only: bool,
+}
+
+/// Process-wide review-only flag, set once by `--review-only` at startup.
+static REVIEW_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn review-only on for this process (called from the CLI flag).
+pub fn set_review_only(on: bool) {
+    REVIEW_ONLY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Is this a review-only run? `--review-only` or `SIRBONE_REVIEW_ONLY=1`; the
+/// env var exists so CI and embedders (ACP, headless) get the mode without a
+/// flag they cannot pass.
+pub fn review_only() -> bool {
+    REVIEW_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+        || matches!(
+            std::env::var("SIRBONE_REVIEW_ONLY").as_deref(),
+            Ok("1" | "true" | "yes" | "on")
+        )
+}
+
+/// Why a call is refused in a review-only run, or `None` when it may proceed.
+///
+/// Bash is held to [`is_safe_readonly`], which is a whitelist: a review agent
+/// inspects, it does not build or test (a compile writes into the work tree).
+/// MCP tools are refused wholesale — the protocol carries no read-only claim, so
+/// there is no honest way to tell a docs lookup from a file writer. Mutating
+/// *native* tools are caught by their `mutation_target` in the policy layer,
+/// which also covers tools added later without touching this list.
+pub fn review_only_refusal(tool: &str, inner: &str) -> Option<String> {
+    if tool == "bash" && !is_safe_readonly(inner) {
+        return Some(format!(
+            "review-only run: `{inner}` is not a read-only command"
+        ));
+    }
+    if tool.starts_with("mcp__") {
+        return Some(format!(
+            "review-only run: MCP tool `{tool}` is blocked (its side effects cannot be inspected)"
+        ));
+    }
+    None
 }
 
 /// Git commands that destroy uncommitted work or rewrite/publish history.
@@ -66,6 +129,7 @@ impl PermissionConfig {
             }
         }
         cfg.mcp_trust = crate::mcp::trust_map();
+        cfg.review_only = review_only();
         cfg
     }
 
@@ -202,8 +266,9 @@ pub fn tool_inner(tool: &str, args: &serde_json::Value) -> String {
 /// Trust boundary: writing to these paths would let injected content extend the
 /// system prompt or permission config with full trust. `inner` is a file tool's
 /// target path (absolute, or `~`-prefixed). True if it lands under
-/// `~/.sirbone/system|prompts|skills` or is `~/.sirbone/config.json`. Skills are
-/// included so raw file tools can't bypass the gated `save_skill` path.
+/// `~/.sirbone/system|prompts|skills`, or is a `config.json` — the global one or
+/// any per-project one under `~/.sirbone/projects/`. Skills are included so raw
+/// file tools can't bypass the gated `save_skill` path.
 pub fn is_protected_config_path(home: &std::path::Path, inner: &str) -> bool {
     use std::path::{Component, PathBuf};
     // Anchor the target: `~/` → home, relative → cwd, absolute → itself.
@@ -240,6 +305,28 @@ pub fn is_protected_config_path(home: &std::path::Path, inner: &str) -> bool {
         || resolved.starts_with(base.join("prompts"))
         || resolved.starts_with(base.join("skills"))
         || resolved == base.join("config.json")
+        // The per-project config is not state: it defines `permissions` — whose
+        // section *replaces* the global one wholesale — and `hooks`, whose
+        // commands run through `sh -c`. Writing it is therefore a trust
+        // extension exactly like writing the global file, and the permissive
+        // default policy would otherwise let it through unannounced. Matched by
+        // filename under `projects/` so the caches and session state living in
+        // the same directory stay unguarded.
+        || (resolved.starts_with(base.join("projects"))
+            && resolved.file_name().is_some_and(|n| n == "config.json"))
+}
+
+/// Editable `Tool(body)` glob proposed for the interactive "allow always"
+/// choice. The tool name is capitalized for readability (matching is
+/// case-insensitive); the body is the literal command/path, which the user can
+/// widen with `*` before it is persisted to `permissions.allow`.
+pub fn suggested_glob(tool: &str, inner: &str) -> String {
+    let mut chars = tool.chars();
+    let cap = match chars.next() {
+        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    };
+    format!("{cap}({inner})")
 }
 
 /// Read-only commands that are always safe — skip the classifier for these.
@@ -487,6 +574,18 @@ mod tests {
     }
 
     #[test]
+    fn suggested_glob_capitalizes_tool() {
+        assert_eq!(
+            suggested_glob("bash", "rm -rf build/"),
+            "Bash(rm -rf build/)"
+        );
+        assert_eq!(suggested_glob("write", ".env"), "Write(.env)");
+        // The proposed rule round-trips through the matcher it will be stored in.
+        let g = suggested_glob("bash", "rm -rf build/");
+        assert!(pattern_matches(&g, "bash", "rm -rf build/"));
+    }
+
+    #[test]
     fn glob_exact_and_wildcard() {
         assert!(glob_matches("cargo test", "cargo test"));
         assert!(!glob_matches("cargo test", "cargo test --release"));
@@ -504,6 +603,16 @@ mod tests {
         assert!(pattern_matches("Bash", "bash", "anything at all"));
         assert!(!pattern_matches("Bash(cargo test)", "read", "cargo test"));
         assert!(pattern_matches("Write(.env*)", "write", ".env.local"));
+        assert!(pattern_matches(
+            "Write(*notesdb/export.py)",
+            "write",
+            "/work/notesdb/export.py"
+        ));
+        assert!(pattern_matches(
+            "Write(*notesdb/export.py)",
+            "write",
+            "notesdb/export.py"
+        ));
     }
 
     #[test]
@@ -657,10 +766,25 @@ mod tests {
             home,
             "/home/dio/.sirbone/system/../system/evil.md"
         ));
-        // project state and unrelated paths are not protected
+        // The per-project config defines `permissions` and `hooks` just like the
+        // global file, so it is guarded too — at any depth, and by filename.
+        assert!(is_protected_config_path(
+            home,
+            "/home/dio/.sirbone/projects/p/config.json"
+        ));
+        assert!(is_protected_config_path(
+            home,
+            "/home/dio/x/../.sirbone/projects/p/config.json"
+        ));
+        // project state and unrelated paths are not protected: the guard is
+        // keyed on the filename, not on the projects directory as a whole.
         assert!(!is_protected_config_path(
             home,
             "/home/dio/.sirbone/projects/p/meta.json"
+        ));
+        assert!(!is_protected_config_path(
+            home,
+            "/home/dio/.sirbone/projects/p/structure.bin"
         ));
         assert!(!is_protected_config_path(home, "/home/dio/pi/src/main.rs"));
         // traversal that genuinely escapes the trust root stays unprotected

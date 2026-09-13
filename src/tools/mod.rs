@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{atomic::AtomicBool, Arc, Mutex},
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -71,24 +67,49 @@ impl<T: TypedTool> DynTool for T {
     }
 }
 
+/// Adapter that precomputes a tool's JSON schema at registration.
+/// `schemars::schema_for!` in the blanket impl re-derives the schema on every
+/// request otherwise — static data recomputed on the per-turn critical path.
+struct CachedSchemaTool {
+    inner: Arc<dyn DynTool>,
+    schema: serde_json::Value,
+}
+
+#[async_trait]
+impl DynTool for CachedSchemaTool {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+    fn description(&self) -> &'static str {
+        self.inner.description()
+    }
+    fn schema(&self) -> serde_json::Value {
+        self.schema.clone()
+    }
+    async fn call(&self, args: serde_json::Value) -> Result<String> {
+        self.inner.call(args).await
+    }
+    fn mutation_target(&self, args: &serde_json::Value) -> Option<PathBuf> {
+        self.inner.mutation_target(args)
+    }
+    fn inner_descriptor(&self, args: &serde_json::Value) -> String {
+        self.inner.inner_descriptor(args)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: HashMap<&'static str, Arc<dyn DynTool>>,
     /// Shared working-note store. Clones share the same note (Arc), so the
     /// `note` tool and the agent loop see the same value.
     pub notes: note::NoteStore,
-    /// Live conversation snapshot, refreshed by the agent loop before tool
-    /// execution; the `architect` tool forwards it to its reviewer model.
-    pub transcript: architect::Transcript,
-    /// Per-task architect consult counter (reset at the start of each run).
-    pub architect_calls: Arc<Mutex<u32>>,
-    /// Runtime on/off for the architect tool (Settings screen). Shared with the
-    /// tool so toggling takes effect without re-registering.
-    pub architect_enabled: Arc<AtomicBool>,
     /// Shared background-job store (`bash` with `background: true`). The bash
     /// tool spawns into it, `job_status` reads it, the UI polls it for the
     /// status line and completion notifications.
     pub jobs: jobs::JobStore,
+    /// Live step list maintained by the `todo` tool; UIs read it to render the
+    /// model's current plan.
+    pub todos: todo::TodoStore,
 }
 
 impl ToolRegistry {
@@ -97,21 +118,78 @@ impl ToolRegistry {
     }
 
     pub fn register<T: TypedTool + 'static>(&mut self, tool: T) {
-        self.tools.insert(T::name(&tool), Arc::new(tool));
+        let inner: Arc<dyn DynTool> = Arc::new(tool);
+        let schema = inner.schema();
+        self.tools
+            .insert(inner.name(), Arc::new(CachedSchemaTool { inner, schema }));
+    }
+
+    /// Initialize the authoritative task contract and its small visual
+    /// projection. The model can refine either, but does not need a setup turn.
+    pub fn start_plan(&self, task: &str) {
+        self.notes.start_plan(task);
+        self.todos.set(vec![
+            todo::TodoItem {
+                content: "Ispezionare la richiesta".into(),
+                status: todo::TodoStatus::InProgress,
+            },
+            todo::TodoItem {
+                content: "Implementare la modifica".into(),
+                status: todo::TodoStatus::Pending,
+            },
+            todo::TodoItem {
+                content: "Verificare il risultato".into(),
+                status: todo::TodoStatus::Pending,
+            },
+        ]);
     }
 
     /// Register an already-boxed tool. Used for runtime-discovered tools (e.g.
     /// MCP) that implement `DynTool` directly rather than via `TypedTool`.
+    /// Filters here rather than via `apply_ablation`: MCP tools arrive after that
+    /// pass, so a `SIRBONE_TOOLS` allowlist would otherwise leak them.
     pub fn register_dyn(&mut self, tool: Arc<dyn DynTool>) {
-        self.tools.insert(tool.name(), tool);
+        if !crate::ablate::disabled_tool(tool.name()) {
+            self.tools.insert(tool.name(), tool);
+        }
     }
 
     pub async fn execute(&self, name: &str, args: serde_json::Value) -> Result<String> {
-        self.tools
+        // Embedder progress protocol: one stderr line per tool start/end, so a
+        // spawning process (Juno's action bar) can show what the model is
+        // doing mid-call. Opt-in via env so interactive runs stay clean.
+        let watch = std::env::var_os("SIRBONE_TOOL_STDERR").is_some();
+        if watch {
+            eprintln!("tool-start: {name}");
+        }
+        let result = self
+            .tools
             .get(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?
+            .ok_or_else(|| self.unknown_tool_error(name))?
             .call(args)
-            .await
+            .await;
+        if watch {
+            eprintln!("tool-end: {name}");
+        }
+        result
+    }
+
+    /// Error for a call whose name is not in the registry, carrying the names
+    /// that are. Streamed tool names arrive unvalidated on OpenAI-compatible
+    /// endpoints, and some models leak their own delimiters into the field
+    /// (`…<|tool_call_argument_begin|> web_search` was observed once from
+    /// `mistral-small-latest`): a bare "unknown tool" leaves the model guessing,
+    /// while the allowlist lets it re-issue the call in the same turn. The name
+    /// is echoed truncated so a corrupted field cannot flood the transcript.
+    fn unknown_tool_error(&self, name: &str) -> anyhow::Error {
+        let shown: String = name.chars().take(60).collect();
+        tracing::warn!(tool = %shown, "tool call with a name outside the registry");
+        let mut known: Vec<&str> = self.tools.keys().copied().collect();
+        known.sort_unstable();
+        anyhow::anyhow!(
+            "unknown tool: {shown}. Available tools: {}",
+            known.join(", ")
+        )
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &dyn DynTool> {
@@ -125,24 +203,49 @@ impl ToolRegistry {
         self.tools.get(name).and_then(|t| t.mutation_target(args))
     }
 
+    /// Estimated context cost of one tool's wire entry, mirroring the
+    /// `{name, description, input_schema}` shape sent to the API.
+    fn schema_tokens(tool: &dyn DynTool) -> usize {
+        serde_json::json!({
+            "name": tool.name(),
+            "description": tool.description(),
+            "input_schema": tool.schema(),
+        })
+        .to_string()
+        .len()
+            / truncate::CHARS_PER_TOKEN_ESTIMATE
+    }
+
+    fn schema_cost(&self, mcp: bool) -> (usize, usize) {
+        self.iter()
+            .filter(|t| t.name().starts_with("mcp__") == mcp)
+            .map(Self::schema_tokens)
+            .fold((0, 0), |(n, tok), t| (n + 1, tok + t))
+    }
+
     /// Estimated context cost of MCP tools: `(count, tokens)`. MCP tool schemas
     /// ride in the system payload every turn, so they spend input budget the
     /// same as the prompt — worth surfacing (`-uW5-TaVXu4`: MCP bloats context).
-    /// Mirrors the `{name, description, input_schema}` wire shape sent to the API.
     pub fn mcp_schema_cost(&self) -> (usize, usize) {
-        self.iter()
-            .filter(|t| t.name().starts_with("mcp__"))
-            .map(|t| {
-                serde_json::json!({
-                    "name": t.name(),
-                    "description": t.description(),
-                    "input_schema": t.schema(),
-                })
-                .to_string()
-                .len()
-                    / truncate::CHARS_PER_TOKEN_ESTIMATE
-            })
-            .fold((0, 0), |(n, tok), t| (n + 1, tok + t))
+        self.schema_cost(true)
+    }
+
+    /// Same, for the native tools. They are the always-on half of the schema
+    /// budget: unlike MCP servers nobody opts into them, so their cost is
+    /// invisible until measured.
+    pub fn native_schema_cost(&self) -> (usize, usize) {
+        self.schema_cost(false)
+    }
+
+    /// Per-tool schema cost, dearest first. The ranking the ablation protocol
+    /// needs: which tools are worth an A/B, ordered by what they cost every turn.
+    pub fn schema_ranking(&self) -> Vec<(&str, usize)> {
+        let mut rows: Vec<_> = self
+            .iter()
+            .map(|t| (t.name(), Self::schema_tokens(t)))
+            .collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        rows
     }
 
     pub fn is_empty(&self) -> bool {
@@ -173,11 +276,9 @@ pub fn read_only_registry() -> ToolRegistry {
     t
 }
 
-pub mod architect;
+pub mod ask_user;
 pub mod bash;
 pub mod code_map;
-#[cfg(feature = "rag")]
-pub mod doc_search;
 pub mod edit;
 pub mod freshness;
 pub mod glob;
@@ -186,7 +287,10 @@ pub mod historia;
 pub mod jobs;
 pub mod load_skill;
 pub mod note;
+pub mod patch;
 pub mod read;
+pub mod spill;
+pub mod todo;
 pub mod truncate;
 pub mod undo;
 pub mod verify;
@@ -194,11 +298,9 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
-pub use architect::{Architect, ArchitectTool};
+pub use ask_user::{AskUserRoundTool, AskUserTool};
 pub use bash::BashTool;
 pub use code_map::CodeMapTool;
-#[cfg(feature = "rag")]
-pub use doc_search::DocSearchTool;
 pub use edit::EditTool;
 pub use freshness::ReadStamps;
 pub use glob::GlobTool;
@@ -207,7 +309,9 @@ pub use historia::HistoriaTool;
 pub use jobs::{JobStatusTool, JobStore};
 pub use load_skill::LoadSkillTool;
 pub use note::{NoteStore, NoteTool};
+pub use patch::PatchTool;
 pub use read::ReadTool;
+pub use todo::{TodoItem, TodoStatus, TodoStore, TodoTool};
 pub use truncate::{truncate_output, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 pub use undo::{UndoStore, UndoTool};
 pub use verify::VerifyTool;
@@ -260,6 +364,14 @@ mod tests {
         let (n1, tok1) = reg.mcp_schema_cost();
         assert_eq!(n1, 1);
         assert!(tok1 > 0, "MCP schema should cost some tokens");
+
+        // The native side is the complement, and the ranking covers both.
+        let (native_n, native_tok) = reg.native_schema_cost();
+        assert_eq!(native_n, 1); // read
+        assert!(native_tok > 0);
+        let ranking = reg.schema_ranking();
+        assert_eq!(ranking.len(), 2);
+        assert!(ranking[0].1 >= ranking[1].1, "ranking is dearest-first");
     }
 
     #[test]
@@ -319,5 +431,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown tool"));
+    }
+
+    /// A corrupted streamed name must come back with the registry's names, and
+    /// must not paste the whole corrupted field into the transcript.
+    #[tokio::test]
+    async fn unknown_tool_error_lists_registry_and_truncates_the_name() {
+        let mut reg = ToolRegistry::new();
+        reg.register(read::ReadTool::default());
+        let garbage = format!("{}<|tool_call_argument_begin|> web_search", "x".repeat(200));
+        let err = reg
+            .execute(&garbage, serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Available tools: read"), "{err}");
+        assert!(err.len() < 200, "{err}");
     }
 }

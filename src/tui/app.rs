@@ -1,6 +1,5 @@
 use std::{
     collections::VecDeque,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -20,8 +19,8 @@ use super::{
     markdown::md_to_lines,
     theme::{styled, Palette, PALETTES},
     widgets::{
-        fmt_elapsed, out_preview_rows, thread_blank, thread_wrap, tool_box_row, tool_box_top,
-        user_box, THREAD_GUTTER, TIMELINE_W,
+        fmt_elapsed, out_preview_rows, thread_blank, thread_wrap, todo_block, tool_box_row,
+        tool_box_top, user_box, THREAD_GUTTER, TIMELINE_W,
     },
 };
 
@@ -211,7 +210,6 @@ pub(super) enum SettingsRow {
     Plan,
     Oracle,
     QuotaBar,
-    Architect,
     Thinking,
     Skills,
     Mcp,
@@ -222,7 +220,6 @@ pub(super) const SETTINGS_ROWS: &[SettingsRow] = &[
     SettingsRow::Plan,
     SettingsRow::Oracle,
     SettingsRow::QuotaBar,
-    SettingsRow::Architect,
     SettingsRow::Thinking,
     SettingsRow::Skills,
     SettingsRow::Mcp,
@@ -275,7 +272,11 @@ pub(super) fn messages_to_replay(messages: &[Message]) -> Vec<ReplayEvent> {
         std::collections::HashMap::new();
     for msg in messages {
         match msg.role {
-            Role::User => {
+            // Tool results reach the transcript two ways: inline on a user-role
+            // message (API format) or as their own `Role::Tool` message, which
+            // is what `session.rs` persists. Both must replay, or every tool box
+            // repaints as "running…" forever.
+            Role::User | Role::Tool => {
                 let mut user_text = String::new();
                 for b in &msg.content {
                     match b {
@@ -363,9 +364,13 @@ pub(super) struct App {
     pub(super) input: String,
     pub(super) cursor_pos: usize,
     pub(super) queued_input: Option<String>,
-    pub(super) scroll: u16,
+    // Images pasted with Ctrl-V, waiting for the next submitted turn. Stored on
+    // disk under `attach_dir`; this vec only holds the handles.
+    pub(super) attachments: Vec<crate::attachments::Attachment>,
+    pub(super) attach_dir: std::path::PathBuf,
+    pub(super) scroll: usize,
     pub(super) auto_scroll: bool,
-    pub(super) max_scroll: u16,
+    pub(super) max_scroll: usize,
     pub(super) busy: bool,
     pub(super) focus: Focus,
     pub(super) status: AgentStatus,
@@ -417,17 +422,16 @@ pub(super) struct App {
     pub(super) trail_scroll: u16,            // lines scrolled up from the bottom of the trail
     pub(super) trail_max_scroll: u16,        // clamp for trail_scroll, set each render
     pub(super) hover_divider: bool,          // pointer is over the resize divider
-    pub(super) scroll_to: Option<u16>,       // trail-click jump: scroll the chat toward this line
+    pub(super) scroll_to: Option<usize>,     // trail-click jump: scroll the chat toward this line
     pub(super) selected_entry: Option<usize>, // trail entry highlighted by a click (cleared on manual scroll)
     pub(super) popup: Option<Popup>,
     pub(super) chat_area: Rect,
     pub(super) thread_active: bool, // rail open: agent output nests under current user msg
-    pub(super) confirm_request: Option<String>, // pending approval (y/n dialog) for a destructive command
+    pub(super) prompt: Option<super::widgets::PromptUi>, // pending user prompt (permission gate or ask_user question)
     pub(super) jobs_running: Vec<(u32, String, Duration, Option<f32>)>, // background jobs, polled each frame
     pub(super) localize: bool, // run the localization pre-pass before each turn (Settings, `l`)
-    pub(super) plan: bool, // `/plan`: prefix a directive so the model records a SPEC via the `plan` tool
-    pub(super) oracle: bool, // `/oracle`: post-Done test gate (loop + rollback)
-    pub(super) architect: Option<Arc<std::sync::atomic::AtomicBool>>, // Some if configured; Settings `a`
+    pub(super) plan: bool,     // `/plan`: initialize a compact persistent task contract
+    pub(super) oracle: bool,   // `/oracle`: post-Done test gate (loop + rollback)
     pub(super) thinking_budget: Option<u32>, // mirrors the client's budget for display; Settings `t`
     // Active account-wide 5-hour quota window (persisted under ~/.sirbone),
     // shown in the info bar. None until the first prompt or once it has lapsed.
@@ -438,13 +442,20 @@ pub(super) struct App {
 
 const BUILTIN_SLASH: &[(&str, &str)] = &[
     ("help", "Show available commands"),
-    ("login", "Seed the global ~/.sirbone/.env (configure credentials once)"),
+    (
+        "login",
+        "Seed the global ~/.sirbone/.env (configure credentials once)",
+    ),
     ("clear", "Clear conversation (start a new one)"),
     (
         "resume",
         "Resume a saved conversation (/resume, /resume <n>)",
     ),
     ("compact", "Summarize conversation to free tokens"),
+    (
+        "historia",
+        "Continue from project history (/historia [date or topic])",
+    ),
     ("init", "Build the code map and write AGENTS.md"),
     (
         "tokens",
@@ -465,6 +476,10 @@ const BUILTIN_SLASH: &[(&str, &str)] = &[
         "Toggle plan mode (model records a SPEC via the plan tool before editing)",
     ),
     ("oracle", "Toggle the post-Done test gate (loop + rollback)"),
+    (
+        "setup-verification",
+        "Configure deterministic project verification",
+    ),
     (
         "verify",
         "Run the project's test command now and show the result",
@@ -525,6 +540,8 @@ impl App {
             input: String::new(),
             cursor_pos: 0,
             queued_input: None,
+            attachments: Vec::new(),
+            attach_dir: std::path::PathBuf::new(),
             scroll: 0,
             auto_scroll: true,
             max_scroll: 0,
@@ -578,14 +595,13 @@ impl App {
             popup: None,
             chat_area: Rect::default(),
             thread_active: false,
-            confirm_request: None,
+            prompt: None,
             jobs_running: Vec::new(),
             localize: std::env::var_os("SIRBONE_NO_LOCALIZE").is_none(),
             plan: meta.plan.unwrap_or(false),
             oracle: meta
                 .oracle
                 .unwrap_or_else(|| crate::oracle::Oracle::load().is_some()),
-            architect: None,
             thinking_budget: None,
             show_logs: false,
         }
@@ -705,6 +721,7 @@ impl App {
         self.scroll = 0;
         self.auto_scroll = true;
         self.thread_active = false;
+        self.attachments.clear();
     }
 
     /// Register a real prompt send against the persisted account-wide quota
@@ -734,6 +751,27 @@ impl App {
             self.history.push(text.to_string());
         }
         self.history_idx = None;
+    }
+
+    /// Ctrl-V — pull an image off the system clipboard and hold it for the next
+    /// turn. Only ever runs on this keypress; sirbone never reads the clipboard
+    /// on its own. Text paste stays with the terminal (Ctrl-Shift-V), which is
+    /// why a clipboard without an image is reported, not treated as an error.
+    pub(super) fn attach_from_clipboard(&mut self) {
+        let label = format!("image_{}", self.attachments.len() + 1);
+        let line = match crate::attachments::from_clipboard(&self.attach_dir, label) {
+            Ok(att) => {
+                let mut msg = format!("📎 {}", att.describe());
+                if !crate::attachments::vision_supported() {
+                    msg.push_str(&format!(" — {}", crate::attachments::NO_VISION_WARNING));
+                }
+                self.attachments.push(att);
+                msg
+            }
+            Err(e) => format!("clipboard: {e}"),
+        };
+        self.info_line(line);
+        self.auto_scroll = true;
     }
 
     /// ↑ — recall the previous submitted input, stashing the in-progress draft.
@@ -839,7 +877,8 @@ impl App {
                         } else {
                             format!("  {} already exists", info.path.display())
                         };
-                        self.lines.push(Line::from(Span::styled(head, styled(p.accent, true))));
+                        self.lines
+                            .push(Line::from(Span::styled(head, styled(p.accent, true))));
                         self.lines.push(Line::from(Span::styled(
                             "  fill ONE provider, then restart sirbone:",
                             styled(p.muted, false),
@@ -1146,9 +1185,24 @@ impl App {
                     (d, clk)
                 };
 
+                // The `todo` tool renders as a live checklist, not a generic
+                // IN/OUT box — parsed from the call input (structured items).
+                let todo_items = (name == "todo" && !is_error && result != "blocked")
+                    .then(|| {
+                        tool_input.as_ref().and_then(|(_, _, inp, _, _)| {
+                            serde_json::from_value::<Vec<crate::tools::TodoItem>>(
+                                inp.get("todos")?.clone(),
+                            )
+                            .ok()
+                        })
+                    })
+                    .flatten();
+
                 // Build the tool box block, then drop it onto the timeline rail.
                 let mut blk: Vec<Line<'static>> = Vec::new();
-                if let Some(rest) = result.strip_prefix("Edited ") {
+                if let Some(items) = todo_items {
+                    blk.extend(todo_block(&items, start_clock.as_deref(), elapsed, cw, p));
+                } else if let Some(rest) = result.strip_prefix("Edited ") {
                     // Side-by-side (old | new) diff with its own framed box.
                     let (head, diff) = rest.split_once("\n\n").unwrap_or((rest, ""));
                     let path = head.trim_end_matches('.').trim();
@@ -1237,7 +1291,11 @@ impl App {
                 used_tokens,
                 context_window,
                 cached_tokens,
+                ..
             } => {
+                if used_tokens == 0 {
+                    return;
+                }
                 self.ctx_pct =
                     ((used_tokens as u64 * 100) / context_window.max(1) as u64).min(100) as u8;
                 self.cached_pct =
@@ -1409,6 +1467,7 @@ mod tests {
             Message::user("ciao"),
             Message {
                 role: Role::Assistant,
+                injected: false,
                 content: vec![
                     ContentBlock::Text { text: "ok".into() },
                     ContentBlock::ToolUse {
@@ -1420,6 +1479,7 @@ mod tests {
             },
             Message {
                 role: Role::User,
+                injected: false,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".into(),
                     content: "file.txt".into(),
@@ -1428,6 +1488,7 @@ mod tests {
             },
             Message {
                 role: Role::Assistant,
+                injected: false,
                 content: vec![ContentBlock::Text {
                     text: "done".into(),
                 }],
@@ -1470,6 +1531,7 @@ mod tests {
         let messages = vec![
             Message {
                 role: Role::Assistant,
+                injected: false,
                 content: vec![
                     ContentBlock::Text {
                         text: "reading the two files".into(),
@@ -1488,6 +1550,7 @@ mod tests {
             },
             Message {
                 role: Role::User,
+                injected: false,
                 content: vec![
                     ContentBlock::ToolResult {
                         tool_use_id: "a".into(),
@@ -1546,6 +1609,44 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, ["a", "b", "a", "b"]);
+    }
+
+    /// `session.rs` persists tool output as its own `Role::Tool` message, so a
+    /// resumed session (`--session`, `/resume`, `sirbone demo`) replays that
+    /// shape — not the inline user-role one. Dropping it left every tool box
+    /// stuck on "running…".
+    #[test]
+    fn replay_renders_tool_role_results() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                injected: false,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                }],
+            },
+            Message {
+                role: Role::Tool,
+                injected: false,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "fn main() {}".into(),
+                    is_error: false,
+                }],
+            },
+        ];
+
+        let end = messages_to_replay(&messages)
+            .into_iter()
+            .find_map(|e| match e {
+                ReplayEvent::Agent(AgentEvent::ToolCallEnd { name, result, .. }) => {
+                    Some((name, result))
+                }
+                _ => None,
+            });
+        assert_eq!(end, Some(("read".into(), "fn main() {}".into())));
     }
 
     fn tool_start(id: &str, name: &str) -> AgentEvent {

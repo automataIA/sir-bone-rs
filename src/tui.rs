@@ -19,7 +19,7 @@ pub use theme::{
 };
 pub use widgets::{
     build_kb_lines, fmt_elapsed, fmt_tok, job_gauge, kb_combo, kb_single, out_preview_rows,
-    render_confirm_dialog, render_scroll_indicators, running_tool_block, thread_blank, thread_wrap,
+    render_prompt_dialog, render_scroll_indicators, running_tool_block, thread_blank, thread_wrap,
     timeline_entry_lines, timeline_tree_parts, tool_box_row, tool_box_top, user_box, wrap_text,
-    KB_PANEL_W, THREAD_GUTTER, TIMELINE_W, TIMELINE_W_MAX, TIMELINE_W_MIN,
+    PromptUi, KB_PANEL_W, THREAD_GUTTER, TIMELINE_W, TIMELINE_W_MAX, TIMELINE_W_MIN,
 };

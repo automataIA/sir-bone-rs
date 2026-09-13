@@ -42,12 +42,9 @@ impl TypedTool for VerifyTool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[tokio::test]
-    async fn verify_runs_without_config() {
-        // With no oracle config in the test env, it returns guidance, not an error.
-        let out = VerifyTool.run(VerifyInput::default()).await.unwrap();
-        assert!(!out.is_empty());
+    async fn verify_without_config_returns_guidance() {
+        let out = crate::oracle::verify_with_command(None).await;
+        assert!(out.starts_with("No test command configured."));
     }
 }

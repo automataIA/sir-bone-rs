@@ -1,0 +1,63 @@
+name: Publish VS Code Extension
+
+# Fires on the same version tags as the binary release workflow, so a single
+# `git tag vX.Y.Z && git push --tags` publishes both the binaries (release.yml)
+# and the VS Code extension. The version actually published is the one in
+# editors/vscode/package.json — bump it in lockstep before tagging.
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    env:
+      OPEN_VSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
+      VS_MARKETPLACE_TOKEN: ${{ secrets.VS_MARKETPLACE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+      - run: npm run compile
+
+      # Build the .vsix once, then reuse it for both registries.
+      - name: Package .vsix
+        run: npx --yes @vscode/vsce package -o sirbone-vscode.vsix
+
+      - name: Publish to Open VSX
+        uses: HaaLeo/publish-vscode-extension@v2
+        with:
+          pat: ${{ env.OPEN_VSX_TOKEN }}
+          extensionFile: editors/vscode/sirbone-vscode.vsix
+          skipDuplicate: true
+
+      # Optional: only runs if the VS_MARKETPLACE_TOKEN secret is set.
+      # (Azure DevOps PAT — see the PAT retirement note in pub-extensions.md.)
+      - name: Publish to VS Marketplace
+        if: ${{ env.VS_MARKETPLACE_TOKEN != '' }}
+        uses: HaaLeo/publish-vscode-extension@v2
+        with:
+          pat: ${{ env.VS_MARKETPLACE_TOKEN }}
+          registryUrl: https://marketplace.visualstudio.com
+          extensionFile: editors/vscode/sirbone-vscode.vsix
+          skipDuplicate: true
+
+      # Also attach the .vsix to the GitHub Release that cargo-dist creates for
+      # this tag, so it can be installed manually too.
+      - name: Attach .vsix to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: editors/vscode/sirbone-vscode.vsix

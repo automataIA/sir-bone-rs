@@ -1,6 +1,6 @@
 # The TUI
 
-Launch with `cargo run -- --tui`. The interface has a chat pane, a side **trail**
+Launch with `sirbone` (`cargo run` from source) — the TUI is the default front-end. The interface has a chat pane, a side **trail**
 panel listing each turn/tool as a clickable step, a status row (run state + extended
 thinking tail), and an info bar (provider, model, context usage, cache-hit share,
 background jobs).
@@ -19,7 +19,7 @@ background jobs).
 | `Alt+B` | toggle the trail panel |
 | `Alt+P` | cycle color palette |
 | `Alt+A` | about screen (keybindings + boar) |
-| `Alt+S` | settings (toggle localize, plan, oracle, architect, thinking budget) |
+| `Alt+S` | settings (toggle localize, plan, oracle, thinking budget) |
 | `Esc` | cancel a running turn / drop a queued message |
 | `Ctrl+C` | cancel current turn; at the prompt, quit |
 | `Shift`+drag | select text in the chat pane (see below) |
@@ -44,8 +44,18 @@ syntax highlighting, and even **mermaid** diagrams drawn in the terminal.
 ## Slash commands
 
 Type `/` in the input for built-in commands (e.g. `/help`, `/init`, `/model`,
-`/plan`, `/rollback`, `/tokens`) and any installed skills (`/your-skill`). Skills typed
-this way inject their instruction body into the conversation.
+`/plan`, `/rollback`, `/tokens`, `/quit`) and any installed skills (`/your-skill`). Skills typed
+this way inject their instruction body into the conversation. `/quit` exits
+immediately — even mid-turn, it cancels the in-flight request first.
+
+Verification has three dedicated commands:
+
+- `/setup-verification` opens the offline project wizard and writes only after confirmation.
+- `/oracle` toggles and persists the authoritative post-`Done` gate for this project.
+- `/verify` runs the configured authoritative command once, independently of the gate toggle.
+
+Post-edit hooks remain advisory; oracle failures are authoritative and can return
+the agent to the loop within the configured attempt limit.
 
 ## Palettes
 

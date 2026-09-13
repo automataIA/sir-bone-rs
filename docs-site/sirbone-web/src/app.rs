@@ -718,7 +718,6 @@ pub struct MockApp {
     about_mode: bool,
     settings_mode: bool,
     localize: bool,
-    architect_on: bool,
     thinking_budget: Option<u32>,
     ctx_pct: u8,
     ctx_warned: bool, // mirrors tui: one-shot 70% context-rot warning
@@ -779,7 +778,6 @@ impl MockApp {
             about_mode: false,
             settings_mode: false,
             localize: true,
-            architect_on: true,
             thinking_budget: None,
             ctx_pct: 8,
             ctx_warned: false,
@@ -1663,10 +1661,6 @@ impl MockApp {
             row("l", format!("Localize pre-pass:  {}", on(self.localize))),
             row("p", format!("Plan mode (SPEC via plan tool first):  {}", on(self.plan))),
             row("o", format!("Oracle gate (test loop after done):  {}", on(self.oracle))),
-            row(
-                "a",
-                format!("Architect (2nd opinion):  {}", on(self.architect_on)),
-            ),
             row("t", format!("Thinking budget:  {think}")),
             Line::default(),
             Line::from(Span::styled(
@@ -1691,7 +1685,6 @@ impl MockApp {
                 KeyCode::Char('l') if !alt => self.localize = !self.localize,
                 KeyCode::Char('p') if !alt => self.plan = !self.plan,
                 KeyCode::Char('o') if !alt => self.oracle = !self.oracle,
-                KeyCode::Char('a') if !alt => self.architect_on = !self.architect_on,
                 KeyCode::Char('t') if !alt => {
                     self.thinking_budget = match self.thinking_budget {
                         None => Some(8000),

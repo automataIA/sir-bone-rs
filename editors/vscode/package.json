@@ -1,0 +1,132 @@
+{
+  "name": "sirbone-vscode",
+  "displayName": "Sir Bone",
+  "description": "Chat panel that drives the sirbone CLI agent inside VS Code.",
+  "version": "0.10.1",
+  "publisher": "sirbone",
+  "engines": { "vscode": "^1.97.0" },
+  "categories": ["Other"],
+  "repository": { "type": "git", "url": "https://github.com/automataIA/sir-bone-rs.git" },
+  "license": "MIT OR Apache-2.0",
+  "icon": "images/icon.png",
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "sirbone", "title": "Sir Bone", "icon": "images/icon.svg" }
+      ]
+    },
+    "views": {
+      "sirbone": [
+        { "id": "sirbone.chatView", "name": "Chat", "type": "webview" }
+      ]
+    },
+    "commands": [
+      { "command": "sirbone.openChat", "title": "Sirbone: Open Chat" },
+      { "command": "sirbone.newChat", "title": "New Chat", "icon": "$(add)" },
+      { "command": "sirbone.openSettings", "title": "Sir Bone: Settings", "icon": "$(gear)" },
+      { "command": "sirbone.signIn", "title": "Sir Bone: Sign in / set API key" }
+    ],
+    "configuration": {
+      "title": "Sir Bone",
+      "properties": {
+        "sirbone.binaryPath": {
+          "type": "string",
+          "default": "sirbone",
+          "markdownDescription": "The sirbone executable to run. The default searches VS Code's PATH and Cargo's standard user install directory, `~/.cargo/bin`. Explicit paths support `~`."
+        },
+        "sirbone.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Extra command-line flags appended to every run. Use for options without a dedicated setting below, e.g. `[\"--anthropic-base-url\", \"https://...\"]`."
+        },
+        "sirbone.planMode": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Start Sir Bone in Plan mode. When enabled, the extension passes `SIRBONE_PLAN=1` to every new turn."
+        },
+        "sirbone.contextWindow": {
+          "type": "number",
+          "default": 200000,
+          "markdownDescription": "Model context window in tokens. Only drives the **ctx %** gauge in the status bar and is passed to sirbone as `SIRBONE_CONTEXT_WINDOW` so its compaction threshold matches. Set it to your model's real window (e.g. 200000 for Claude, 128000 for many others)."
+        },
+        "sirbone.model": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Model id to use for this workspace. Empty keeps the project's last model / provider default. Passed as `SIRBONE_MODEL`."
+        },
+        "sirbone.thinkingBudget": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Extended-thinking budget in tokens: lets the model reason before answering. `0` disables it. Higher = deeper reasoning but slower and more expensive. Passed as `SIRBONE_THINKING_BUDGET`."
+        },
+        "sirbone.maxSteps": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Hard cap on tool-call iterations per turn. `0` lets sirbone pick automatically. Raise it for long agentic tasks that hit the limit. Passed as `SIRBONE_MAX_STEPS`."
+        },
+        "sirbone.grounding": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Mechanically verify the model's claims about the codebase (paths, symbols, counts) after a run. Recommended on. Turning it off sets `SIRBONE_NO_GROUNDING`."
+        },
+        "sirbone.localize": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run a localization pre-pass that finds the relevant files before the turn starts. Improves accuracy on large repos; costs a little latency. Off sets `SIRBONE_NO_LOCALIZE`."
+        },
+        "sirbone.groundContext": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Front-load real file/symbol locations into the initial context so the model needs fewer exploratory tool calls. Off sets `SIRBONE_NO_GROUND_CONTEXT`."
+        },
+        "sirbone.compaction": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically summarize old messages when the context reaches ~87.5% full, so long chats keep working. Off sets `SIRBONE_NO_COMPACT` (long chats may hit the context limit)."
+        },
+        "sirbone.snapshots": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Take a shadow-git snapshot of the workspace before edits, so changes can be rolled back. Off sets `SIRBONE_NO_SNAPSHOT`."
+        },
+        "sirbone.historia": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable read-only, schema-aware search across the project's persisted chat JSONL. Use `/historia [date or topic]` to retrieve prior work before continuing. Off sets `SIRBONE_NO_HISTORIA`."
+        },
+        "sirbone.ace": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable ACE-lite: sirbone curates per-project 'lessons' it reuses across runs. Experimental / opt-in. On sets `SIRBONE_ACE`."
+        },
+        "sirbone.hygiene": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable the post-edit hygiene pass. Experimental / opt-in. On sets `SIRBONE_HYGIENE`."
+        },
+        "sirbone.yagni": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Add a 'You Aren't Gonna Need It' clause to the prompt to discourage speculative code. Opt-in. On sets `SIRBONE_YAGNI`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "assets": "node scripts/copy-assets.mjs",
+    "compile": "npm run assets && tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@highlightjs/cdn-assets": "^11",
+    "@types/node": "^20",
+    "@types/vscode": "^1.97.0",
+    "dompurify": "^3",
+    "marked": "^12",
+    "mermaid": "^11",
+    "typescript": "^5"
+  }
+}

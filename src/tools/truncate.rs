@@ -10,8 +10,23 @@ pub const DEFAULT_MAX_BYTES: usize = DEFAULT_MAX_RESULT_TOKENS * CHARS_PER_TOKEN
 
 /// Truncate with the default line+byte caps — the common case. Web tools pass
 /// an explicit (smaller) line cap, so they stay on [`truncate_output`].
+///
+/// This is also the path that spills: when the content really is over budget,
+/// the whole of it is written to a recoverable file first (see
+/// [`super::spill`]) and the marker points at it, so the elided middle is one
+/// `read` away instead of one re-run away. Nothing is written when the content
+/// fits.
 pub fn truncate_default(content: String) -> String {
-    truncate_output(content, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)
+    if content.len() <= DEFAULT_MAX_BYTES && content.lines().count() <= DEFAULT_MAX_LINES {
+        return content;
+    }
+    let full = super::spill::write(&content);
+    truncate_inner(
+        content,
+        DEFAULT_MAX_LINES,
+        DEFAULT_MAX_BYTES,
+        full.as_deref(),
+    )
 }
 
 /// Truncate tool output to fit within line and byte limits.
@@ -19,6 +34,28 @@ pub fn truncate_default(content: String) -> String {
 /// tail, eliding the middle (where the signal usually lives in logs/tests), and
 /// the marker tells the agent how to narrow the next query.
 pub fn truncate_output(content: String, max_lines: usize, max_bytes: usize) -> String {
+    truncate_inner(content, max_lines, max_bytes, None)
+}
+
+/// How the marker tells the agent to get the rest back: the spilled file when
+/// there is one, the generic advice otherwise (still valid — narrowing beats
+/// reading 12k lines back in either way).
+fn recovery(full: Option<&std::path::Path>) -> String {
+    match full {
+        Some(p) => format!(
+            "full output: {}; narrow with grep/offset/limit",
+            p.display()
+        ),
+        None => "narrow with grep/offset/limit, or re-run with | tail -n N".to_string(),
+    }
+}
+
+fn truncate_inner(
+    content: String,
+    max_lines: usize,
+    max_bytes: usize,
+    full: Option<&std::path::Path>,
+) -> String {
     if content.len() <= max_bytes && content.lines().count() <= max_lines {
         return content;
     }
@@ -39,15 +76,17 @@ pub fn truncate_output(content: String, max_lines: usize, max_bytes: usize) -> S
     // it always sees at least the start of the content and the truncation signal.
     if head.is_empty() && tail.is_empty() {
         let mut out = take_char_prefix(&content, max_bytes);
-        out.push_str(
-            "\n... (content truncated — narrow with grep/offset/limit, or re-run with | tail -n N) ...\n",
-        );
+        out.push_str(&format!(
+            "\n... (content truncated — {}) ...\n",
+            recovery(full)
+        ));
         return out;
     }
 
     let mut out = head.join("\n");
     out.push_str(&format!(
-        "\n... ({omitted} lines truncated — narrow with grep/offset/limit, or re-run with | tail -n N) ...\n"
+        "\n... ({omitted} lines truncated — {}) ...\n",
+        recovery(full)
     ));
     out.push_str(&tail.join("\n"));
     out
@@ -220,6 +259,30 @@ mod tests {
             !r.contains("lines truncated"),
             "no marker when falling back: {r}"
         );
+    }
+
+    #[test]
+    fn oversized_output_is_recoverable_from_the_marker() {
+        // Multibyte on purpose: the elided middle is cut on a char boundary in
+        // the text, and the file must still hold the original byte-for-byte.
+        let s: String = (0..DEFAULT_MAX_LINES + 500)
+            .map(|i| format!("línea {i} — àèìòù\n"))
+            .collect();
+        let out = truncate_default(s.clone());
+
+        let path = out
+            .lines()
+            .find_map(|l| l.split("full output: ").nth(1))
+            .and_then(|rest| rest.split(';').next())
+            .expect("marker carries the spill path");
+        assert_eq!(std::fs::read_to_string(path).expect("readable"), s);
+    }
+
+    #[test]
+    fn output_within_budget_writes_nothing() {
+        let out = truncate_default("small enough\n".to_string());
+        assert_eq!(out, "small enough\n");
+        assert!(!out.contains("full output"));
     }
 
     #[test]

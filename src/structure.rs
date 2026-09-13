@@ -370,11 +370,62 @@ pub fn parse_str(lang: Lang, content: &str) -> FileStructure {
     }
 }
 
-/// Pass 0: walk `root`, returning supported (path, lang) pairs, sorted by path
-/// (the parallel walk yields entries in nondeterministic order). Honours
-/// `.gitignore` and always prunes [`PRUNE_DIRS`].
-pub fn discover(root: &Path) -> Vec<(PathBuf, Lang)> {
-    let walker = WalkBuilder::new(root)
+/// One declaration of a file outline: 1-based line number plus its full
+/// [`signature`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decl {
+    pub line: usize,
+    pub sig: String,
+}
+
+/// Language of `path` by extension, or `None` when unsupported.
+pub fn lang_for_path(path: &Path) -> Option<Lang> {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .and_then(Lang::from_ext)
+}
+
+/// Declarations in `content`, in file order, at most one per line.
+///
+/// Same regexes and signature scanner as [`parse_str`], but keyed by position
+/// instead of by name: the caller needs to know *where* to read, so it can ask
+/// for that slice. Unlike `parse_str` the test module is not stripped — the
+/// point is to describe the whole file.
+pub fn outline(lang: Lang, content: &str) -> Vec<Decl> {
+    let mut out: Vec<Decl> = regexes(lang)
+        .defs
+        .iter()
+        .flat_map(|re| re.captures_iter(content))
+        .filter_map(|c| {
+            let m = c.get(0)?;
+            let sig = match lang {
+                Lang::Sql => c.get(1)?.as_str().trim().to_string(),
+                _ => signature(lang, content, m.start()),
+            };
+            // `(?m)^\s*` can start the match on the preceding blank line;
+            // anchor the line number on the first non-space byte, as
+            // `signature` does, or the decl reports one line too early.
+            let head = content[m.start()..]
+                .find(|ch: char| !ch.is_whitespace())
+                .map_or(m.start(), |d| m.start() + d);
+            (!sig.is_empty()).then(|| Decl {
+                line: content[..head].matches('\n').count() + 1,
+                sig,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.line
+            .cmp(&b.line)
+            .then_with(|| b.sig.len().cmp(&a.sig.len()))
+    });
+    out.dedup_by_key(|d| d.line);
+    out
+}
+
+/// The shared walk: honours `.gitignore`, prunes [`PRUNE_DIRS`], caps file size.
+fn walker(root: &Path) -> ignore::WalkParallel {
+    WalkBuilder::new(root)
         .hidden(false)
         // Honour .gitignore even outside a git repo (default only applies it
         // inside one), so a not-yet-committed project is still filtered.
@@ -390,9 +441,58 @@ pub fn discover(root: &Path) -> Vec<(PathBuf, Lang)> {
                 .is_some_and(|n| PRUNE_DIRS.contains(&n));
             !(is_dir && pruned)
         })
-        .build_parallel();
+        .build_parallel()
+}
 
+/// True for files a reference scan must never open, however the walk reached
+/// them. `.gitignore` normally hides these, but an uncommitted `.env` is exactly
+/// the case where it does not — and a whole-word hit there would print the line,
+/// secret and all. The structural passes never had this exposure because they
+/// filter to source extensions first.
+fn is_secret_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.starts_with(".env")
+        || matches!(
+            path.extension().and_then(|x| x.to_str()),
+            Some("pem" | "key" | "p12" | "pfx")
+        )
+}
+
+/// Every text file under `root`, sorted by path — the corpus for reference
+/// scans, as opposed to [`discover`]'s parsed-source corpus.
+///
+/// Reference listing needs no parser, so restricting it to the four languages
+/// [`Lang`] can parse made the tool answer "no files reference `X`" on a Go or
+/// Java repository: a confident wrong answer, worse than an error. It also hid
+/// mentions in manifests, docs and CI within supported repositories — the
+/// textual completeness that makes `grep` win rename-shaped work. Binary and
+/// minified files are still rejected, by [`read_source`] at read time.
+pub fn discover_text(root: &Path) -> Vec<PathBuf> {
+    let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+    walker(root).run(|| {
+        let tx = tx.clone();
+        Box::new(move |entry| {
+            let Ok(e) = entry else {
+                return ignore::WalkState::Continue;
+            };
+            if e.file_type().is_some_and(|t| t.is_file()) && !is_secret_file(e.path()) {
+                let _ = tx.send(e.path().to_path_buf());
+            }
+            ignore::WalkState::Continue
+        })
+    });
+    drop(tx);
+    let mut out: Vec<PathBuf> = rx.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+/// Pass 0: walk `root`, returning supported (path, lang) pairs, sorted by path
+/// (the parallel walk yields entries in nondeterministic order). Honours
+/// `.gitignore` and always prunes [`PRUNE_DIRS`].
+pub fn discover(root: &Path) -> Vec<(PathBuf, Lang)> {
     let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, Lang)>();
+    let walker = walker(root);
     walker.run(|| {
         let tx = tx.clone();
         Box::new(move |entry| {
@@ -451,12 +551,14 @@ pub fn update(root: &Path, mut old: Index) -> Index {
 }
 
 /// Files (sorted) containing a whole-word match of `symbol` — a textual "who
-/// uses X" across supported files in `root`.
+/// uses X" across every text file in `root` (see [`discover_text`]), not only
+/// the parsed languages: a manifest, a doc or a CI workflow mentions a symbol
+/// just as meaningfully as a `.rs` file does.
 pub fn find_references(root: &Path, symbol: &str) -> Vec<PathBuf> {
     let Ok(re) = Regex::new(&format!(r"\b{}\b", regex::escape(symbol))) else {
         return Vec::new();
     };
-    let mut hits: Vec<PathBuf> = par_map(discover(root), |(p, _)| {
+    let mut hits: Vec<PathBuf> = par_map(discover_text(root), |p| {
         read_source(&p).filter(|c| re.is_match(c)).map(|_| p)
     })
     .into_iter()
@@ -466,8 +568,76 @@ pub fn find_references(root: &Path, symbol: &str) -> Vec<PathBuf> {
     hits
 }
 
-/// Deterministic whole-word occurrence count of `token` across the same source
-/// corpus as [`find_references`]. Used by claim grounding to check numeric
+/// One referencing file with the matching lines themselves.
+#[derive(Debug, Clone)]
+pub struct RefLines {
+    pub path: PathBuf,
+    /// 1-based line number and trimmed source line, in file order, capped.
+    pub lines: Vec<(usize, String)>,
+    /// Matching lines past the cap, counted but not returned.
+    pub extra: usize,
+}
+
+/// Like [`find_references`], but returns the matching lines, so the caller can
+/// answer "where is this, and what does it look like" without a follow-up read.
+/// `per_file` caps the lines kept per file; the rest are counted in `extra`.
+///
+/// The cut is not simply the first `per_file` matches: in an indexed language a
+/// line that *declares* `symbol` wins its slot first. Taking matches in file
+/// order silently drops the declaration whenever `per_file` earlier mentions
+/// precede it — an import, a doc comment, a re-export — which is exactly the
+/// line the reader needs and the one a caller cannot recover without opening the
+/// file. Lines are returned in file order regardless of how they were chosen.
+pub fn find_reference_lines(root: &Path, symbol: &str, per_file: usize) -> Vec<RefLines> {
+    let Ok(re) = Regex::new(&format!(r"\b{}\b", regex::escape(symbol))) else {
+        return Vec::new();
+    };
+    let mut hits: Vec<RefLines> = par_map(discover_text(root), |path| {
+        let content = read_source(&path)?;
+        let mut matched: Vec<(usize, String)> = content
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| re.is_match(l))
+            .map(|(i, l)| (i + 1, l.trim().to_string()))
+            .collect();
+        if matched.is_empty() {
+            return None;
+        }
+        // Declaration lines to the front (stable, so file order survives within
+        // each group), then cut, then back to file order for display.
+        if matched.len() > per_file && !crate::ablate::ref_budget_disabled() {
+            if let Some(lang) = lang_for_path(&path) {
+                let decls: Vec<usize> = outline(lang, &content)
+                    .into_iter()
+                    .filter(|d| re.is_match(&d.sig))
+                    .map(|d| d.line)
+                    .collect();
+                if !decls.is_empty() {
+                    matched.sort_by_key(|(n, _)| !decls.contains(n));
+                }
+            }
+        }
+        let extra = matched.len().saturating_sub(per_file);
+        matched.truncate(per_file);
+        matched.sort_unstable_by_key(|(n, _)| *n);
+        Some(RefLines {
+            path,
+            lines: matched,
+            extra,
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    hits.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    hits
+}
+
+/// Deterministic whole-word occurrence count of `token` across the *parsed*
+/// source corpus ([`discover`]), deliberately narrower than
+/// [`find_references`]: a grounded numeric claim ("N `unwrap`s") is about code,
+/// so counting mentions in docs and lockfiles would inflate it. Used by claim
+/// grounding to check numeric
 /// assertions ("N `unwrap`s"). Counts every whole-word match — including
 /// comments/strings — so it does not distinguish call sites from mentions;
 /// treat a mismatch as evidence, not proof.
@@ -763,7 +933,8 @@ pub fn init_doc(root: &Path, index: &Index, edges: &[(PathBuf, PathBuf)]) -> Str
 
     format!(
         "# {name}\n\n\
-         > Auto-generated by `sirbone /init` (AGENTS.md open standard). Edit freely — sirbone and other agent harnesses read this file as project instructions.\n\n\
+         > Auto-generated by `sirbone /init` (AGENTS.md open standard). Edit freely — sirbone and other agent harnesses read this file as project instructions.\n\
+         > Keep it a short checklist: add a rule only after a real mistake or a hard constraint, and drop it once the model no longer needs it — every line here is read on each turn.\n\n\
          ## Overview\n\
          - {} source files, {} dependency edges.\n\
          - Languages: {langs}\n\n\
@@ -1058,6 +1229,52 @@ mod tests {
             !refs.contains(&"nomatch.rs".to_string()),
             "Apple matched App: {refs:?}"
         );
+    }
+
+    #[test]
+    fn find_references_scans_beyond_parsed_languages() {
+        // The parsed-source whitelist (rs/py/js/ts/sql) is an indexing concern.
+        // A reference scan that inherits it answers "no references" on a Go repo
+        // and silently drops manifests, docs and CI — so it must not.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("main.go"), "func Widget() {}").unwrap();
+        std::fs::write(root.join("README.md"), "call `Widget` first").unwrap();
+        std::fs::write(root.join("ci.yml"), "run: Widget --check").unwrap();
+        std::fs::write(root.join("lib.rs"), "fn other() {}").unwrap();
+
+        let refs = names(&find_references(root, "Widget"));
+        for f in ["main.go", "README.md", "ci.yml"] {
+            assert!(refs.contains(&f.to_string()), "{f} missed: {refs:?}");
+        }
+        assert!(!refs.contains(&"lib.rs".to_string()), "{refs:?}");
+
+        let lines = find_reference_lines(root, "Widget", 3);
+        assert_eq!(
+            names(&lines.iter().map(|r| r.path.clone()).collect::<Vec<_>>()).len(),
+            3
+        );
+    }
+
+    #[test]
+    fn reference_scan_never_opens_secret_files() {
+        // `.gitignore` normally hides a `.env`, but an uncommitted one is exactly
+        // where it does not — and a whole-word hit would print the line, secret
+        // and all. `count_occurrences` stays on the parsed corpus, so a doc
+        // mention must not inflate a grounded numeric claim either.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "TOKEN=sk-secret-TOKEN").unwrap();
+        std::fs::write(root.join("app.rs"), "let TOKEN = 1;").unwrap();
+        std::fs::write(root.join("notes.md"), "TOKEN is read from env").unwrap();
+
+        let refs = names(&find_references(root, "TOKEN"));
+        assert!(
+            !refs.contains(&".env".to_string()),
+            "secret scanned: {refs:?}"
+        );
+        assert!(refs.contains(&"notes.md".to_string()), "{refs:?}");
+        assert_eq!(count_occurrences(root, "TOKEN"), 1, "doc mention counted");
     }
 
     fn names(paths: &[PathBuf]) -> Vec<String> {

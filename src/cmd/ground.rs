@@ -20,8 +20,9 @@ use sirbone::Role;
 /// final assistant message.
 pub async fn run_ground(arg: Option<PathBuf>, cwd: &Path) -> Result<()> {
     let text = match arg {
-        Some(path) => std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?,
+        Some(path) => {
+            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?
+        }
         None => last_assistant_text().await?,
     };
     if text.trim().is_empty() {

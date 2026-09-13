@@ -12,11 +12,18 @@ use chrono::{DateTime, Duration, Local};
 use serde::{Deserialize, Serialize};
 
 const WINDOW_HOURS: i64 = 5;
+/// z.ai's own quota endpoint, the one the ZCode client polls for the same figure.
+const GLM_QUOTA_URL: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Window {
     pub start: DateTime<Local>,
     pub end: DateTime<Local>,
+    /// Share of the window's prompt pool already consumed, when the provider
+    /// reports it (GLM on z.ai). None everywhere else: the window is then just
+    /// the local time estimate.
+    #[serde(default)]
+    pub used_pct: Option<u8>,
 }
 
 /// `~/.sirbone/quota_window.json`, if HOME is set.
@@ -43,6 +50,7 @@ fn roll(prev: Option<Window>, now: DateTime<Local>) -> Window {
         _ => Window {
             start: now,
             end: now + Duration::hours(WINDOW_HOURS),
+            used_pct: None,
         },
     }
 }
@@ -54,6 +62,68 @@ pub fn touch() -> Window {
     let w = roll(load(), Local::now());
     save(&w);
     w
+}
+
+/// Replace the estimate with the provider's own figures while the active model
+/// is a GLM served by z.ai, which exposes the real 5-hour pool. Best-effort: a
+/// missing key, a non-z.ai base URL, an HTTP failure or an unexpected shape all
+/// leave the local estimate untouched.
+pub async fn refresh_glm(model: &str) {
+    let var = |k: &str| std::env::var(k).unwrap_or_default();
+    let key = match var("ANTHROPIC_AUTH_TOKEN") {
+        k if !k.is_empty() => k,
+        _ => var("OPENAI_API_KEY"),
+    };
+    if key.is_empty()
+        || !model.to_ascii_lowercase().starts_with("glm")
+        || !(var("ANTHROPIC_BASE_URL").contains("z.ai") || var("OPENAI_BASE_URL").contains("z.ai"))
+    {
+        return;
+    }
+    let Ok(resp) = reqwest::Client::new()
+        .get(GLM_QUOTA_URL)
+        .bearer_auth(key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    else {
+        return;
+    };
+    let Ok(body) = resp.json::<serde_json::Value>().await else {
+        return;
+    };
+    let Some((used_pct, reset)) = five_hour_limit(&body) else {
+        return;
+    };
+    // The API reset is authoritative when present; it is omitted while the pool
+    // is untouched, so fall back to the window already open (and to nothing at
+    // all when the account has not opened one yet).
+    let end = match (reset, load().filter(|w| Local::now() < w.end)) {
+        (Some(r), _) => r,
+        (None, Some(w)) => w.end,
+        (None, None) => return,
+    };
+    save(&Window {
+        start: end - Duration::hours(WINDOW_HOURS),
+        end,
+        used_pct: Some(used_pct),
+    });
+}
+
+/// `(used_pct, reset)` of the z.ai 5-hour prompt pool — the `TOKENS_LIMIT`
+/// entry with `unit: 3, number: 5`. `percentage` is the share *consumed*, and
+/// `nextResetTime` (epoch ms) is absent while the pool is still untouched.
+fn five_hour_limit(body: &serde_json::Value) -> Option<(u8, Option<DateTime<Local>>)> {
+    let limit = body["data"]["limits"]
+        .as_array()?
+        .iter()
+        .find(|l| l["type"] == "TOKENS_LIMIT" && l["unit"] == 3 && l["number"] == 5)?;
+    let used = limit["percentage"].as_f64()?.clamp(0.0, 100.0) as u8;
+    let reset = limit["nextResetTime"]
+        .as_i64()
+        .and_then(DateTime::from_timestamp_millis)
+        .map(|t| t.with_timezone(&Local));
+    Some((used, reset))
 }
 
 /// The active window, or None when none is open (never used, or already lapsed).
@@ -80,5 +150,23 @@ mod tests {
         let next = roll(Some(w), later);
         assert_eq!(next.start, later);
         assert_eq!(next.end, later + Duration::hours(5));
+    }
+
+    #[test]
+    fn reads_the_glm_five_hour_pool() {
+        // Live shape from api.z.ai: the tool limit comes first and carries a
+        // reset, the 5-hour pool is TOKENS_LIMIT unit 3 / number 5.
+        let body = serde_json::json!({"code":200,"data":{"level":"lite","limits":[
+            {"type":"TIME_LIMIT","unit":5,"number":1,"percentage":15,"nextResetTime":1787377211997i64},
+            {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":0}]}});
+        assert_eq!(five_hour_limit(&body), Some((0, None)));
+        // With a reset, it is parsed into local time.
+        let body = serde_json::json!({"data":{"limits":[
+            {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":42,"nextResetTime":1787377211997i64}]}});
+        let (used, reset) = five_hour_limit(&body).unwrap();
+        assert_eq!(used, 42);
+        assert_eq!(reset.unwrap().timestamp_millis(), 1787377211997);
+        // No 5-hour entry at all → nothing to show.
+        assert!(five_hour_limit(&serde_json::json!({"data":{"limits":[]}})).is_none());
     }
 }

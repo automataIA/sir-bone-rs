@@ -52,7 +52,10 @@ impl TypedTool for BashTool {
          --hard`, `push --force`, `checkout .`) unless explicitly requested, and \
          never skip hooks with `--no-verify` — fix the underlying issue instead. \
          For long-running work set background:true — it returns a job id \
-         immediately; poll with job_status instead of blocking."
+         immediately; poll with job_status instead of blocking. \
+         Large output is truncated in the middle, and the full text is saved to \
+         a file whose path is in the truncation marker — read that file instead \
+         of re-running the command."
     }
 
     async fn run(&self, input: BashInput) -> Result<String> {
@@ -95,6 +98,11 @@ impl TypedTool for BashTool {
                         .arg("-KILL")
                         .arg("--")
                         .arg(format!("-{pid}"))
+                        // The process group may exit between the timeout and
+                        // this cleanup attempt; that race is harmless and
+                        // should not leak `kill` diagnostics into the caller.
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
                         .status()
                         .await;
                 }

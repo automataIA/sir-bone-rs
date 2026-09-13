@@ -13,22 +13,25 @@
 //! Both files are optional; a missing or malformed file contributes nothing and
 //! is never an error.
 
-use std::path::PathBuf;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use serde_json::{Map, Value};
 
-/// Global config path (`~/.sirbone/config.json`), if HOME is set.
+/// Global config path (`~/.sirbone/config.json`), if a home dir is resolvable.
 pub fn global_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::Path::new(&home).join(".sirbone/config.json"))
+    Some(dirs::home_dir()?.join(".sirbone/config.json"))
 }
 
-/// Global env path (`~/.sirbone/.env`), if HOME is set. Loaded at startup with
-/// lower precedence than the process environment and the project's `.env`, so a
-/// single global file configures credentials once for every directory.
+/// Global env path (`~/.sirbone/.env`), if a home dir is resolvable. Loaded at
+/// startup with lower precedence than the process environment and the project's
+/// `.env`, so a single global file configures credentials once for every
+/// directory. Uses `dirs::home_dir()` (HOME on unix, USERPROFILE on Windows) so
+/// `sirbone login` works on native Windows shells, matching `project_store`.
 pub fn global_env_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(std::path::Path::new(&home).join(".sirbone/.env"))
+    Some(dirs::home_dir()?.join(".sirbone/.env"))
 }
 
 /// The bundled `.env` template, embedded so the installed binary can seed it
@@ -76,7 +79,64 @@ fn ensure_env_at(path: PathBuf) -> std::io::Result<LoginInfo> {
 /// working directory. State lives under the home sirbone dir, not in the repo.
 pub fn project_path() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    Some(crate::project_store::project_dir(&cwd).join("config.json"))
+    Some(project_path_for(&cwd))
+}
+
+/// Per-project config path for an explicit working directory.
+pub fn project_path_for(cwd: &Path) -> PathBuf {
+    crate::project_store::project_dir(cwd).join("config.json")
+}
+
+/// Atomically update the project config rooted at `cwd`, preserving unrelated keys.
+pub fn update_project_config(
+    cwd: &Path,
+    update: impl FnOnce(&mut Map<String, Value>) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
+    let path = project_path_for(cwd);
+    // Loading configuration is intentionally tolerant, but a mutating wizard
+    // must never replace an unreadable/malformed file with a fresh document.
+    let mut root = if path.exists() {
+        let bytes = std::fs::read(&path)?;
+        serde_json::from_slice(&bytes).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("cannot update malformed config {}: {error}", path.display()),
+            )
+        })?
+    } else {
+        Value::Object(Map::new())
+    };
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| std::io::Error::other("config root is not an object"))?;
+    update(object)?;
+    write_json_atomic(&path, &root)?;
+    Ok(path)
+}
+
+fn write_json_atomic(path: &Path, value: &Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), stamp));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn read(path: Option<PathBuf>) -> Option<Value> {
@@ -128,6 +188,19 @@ pub fn skills_enabled() -> Vec<String> {
 /// Persist the project's `skills.enabled` allowlist. See [`set_project_array`].
 pub fn set_skills_enabled(names: &[String]) -> std::io::Result<()> {
     set_project_array("skills", "enabled", names)
+}
+
+/// Append a glob to the **per-project** `permissions.allow` list (dedup),
+/// preserving every other permission key. Backs the interactive "allow always"
+/// choice: the rule persists across sessions like Claude Code's
+/// `settings.local.json`. Reads only the project-level array so a global rule is
+/// never duplicated into the project file.
+pub fn add_project_allow(glob: &str) -> std::io::Result<()> {
+    let mut allow = string_array(read(project_path()).as_ref(), "permissions", "allow");
+    if !allow.iter().any(|g| g == glob) {
+        allow.push(glob.to_string());
+    }
+    set_project_array("permissions", "allow", &allow)
 }
 
 /// MCP server names enabled for the **current project** (`mcp.enabled` array).
@@ -186,28 +259,18 @@ fn string_array(root: Option<&Value>, section: &str, key: &str) -> Vec<String> {
 /// so a write failure can be surfaced. Project-scoped because enablement is a
 /// per-project choice (a project starts with everything off).
 fn set_project_array(section: &str, key: &str, names: &[String]) -> std::io::Result<()> {
-    let path = project_path().ok_or_else(|| std::io::Error::other("no current dir"))?;
-    let mut root = read(Some(path.clone())).unwrap_or_else(|| Value::Object(Map::new()));
-    let obj = root
-        .as_object_mut()
-        .ok_or_else(|| std::io::Error::other("config root is not an object"))?;
-    let sect = obj
-        .entry(section)
-        .or_insert_with(|| Value::Object(Map::new()));
-    match sect.as_object_mut() {
-        Some(sm) => {
-            sm.insert(key.into(), Value::from(names));
-        }
-        None => {
-            return Err(std::io::Error::other(format!(
-                "config `{section}` is not an object"
-            )));
-        }
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(&root)?)
+    let cwd = std::env::current_dir()?;
+    update_project_config(&cwd, |obj| {
+        let sect = obj
+            .entry(section)
+            .or_insert_with(|| Value::Object(Map::new()));
+        let sm = sect
+            .as_object_mut()
+            .ok_or_else(|| std::io::Error::other(format!("config `{section}` is not an object")))?;
+        sm.insert(key.into(), Value::from(names));
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 /// Merge a global and project section value. Pure.
@@ -252,6 +315,26 @@ fn merge_objects(mut base: Value, overlay: Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn atomic_writer_replaces_a_complete_json_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{\"old\":true}\n").unwrap();
+
+        write_json_atomic(&path, &json!({"new": {"value": 3}})).unwrap();
+
+        let stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored, json!({"new": {"value": 3}}));
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("tmp")),
+            "temporary sibling must be removed after rename"
+        );
+    }
 
     #[test]
     fn ensure_env_at_seeds_then_never_overwrites() {

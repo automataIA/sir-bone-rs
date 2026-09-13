@@ -100,7 +100,7 @@ impl TypedTool for WebFetchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Fetch the text content of a URL via curl. Returns raw response body, truncated if large."
+        "Fetch the text content of a URL via curl. HTML pages are converted to markdown; other bodies are returned raw. Truncated if large."
     }
 
     async fn run(&self, input: WebFetchInput) -> Result<String> {
@@ -108,8 +108,41 @@ impl TypedTool for WebFetchTool {
         if body.is_empty() {
             return Ok("(empty response)".into());
         }
-        Ok(truncate_output(body, 500, DEFAULT_MAX_BYTES))
+        Ok(truncate_output(extract_text(body), 500, DEFAULT_MAX_BYTES))
     }
+}
+
+/// Convert HTML bodies to markdown so markup/script boilerplate never reaches
+/// the context (headroom `html_extractor` pattern, ported natively). Non-HTML
+/// bodies and failed/empty conversions pass through untouched.
+fn extract_text(body: String) -> String {
+    if !looks_like_html(&body) {
+        return body;
+    }
+    match htmd::HtmlToMarkdown::builder()
+        .skip_tags(vec!["script", "style", "noscript"])
+        .build()
+        .convert(&body)
+    {
+        Ok(md) if !md.trim().is_empty() => md,
+        _ => body,
+    }
+}
+
+/// Sniff an HTML document without a Content-Type header: doctype or an <html>
+/// tag within the first KiB. JSON bodies (leading `{`/`[`) never match, even
+/// when a string value embeds markup.
+fn looks_like_html(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return false;
+    }
+    let head: String = trimmed
+        .chars()
+        .take(1024)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    head.starts_with("<!doctype") || head.contains("<html")
 }
 
 /// Fetch a URL's full body via SSRF-vetted curl. Redirects are followed
@@ -176,6 +209,33 @@ mod tests {
     #[test]
     fn default_timeout_is_15s() {
         assert_eq!(default_timeout(), 15);
+    }
+
+    #[test]
+    fn html_body_converted_to_markdown_script_dropped() {
+        let html = "<!DOCTYPE html><html><head><script>var x=1;</script>\
+                    <style>body{color:red}</style></head>\
+                    <body><h1>Title</h1><p>Hello <a href=\"/x\">link</a></p></body></html>";
+        let md = extract_text(html.into());
+        assert!(md.contains("# Title"), "got: {md}");
+        assert!(md.contains("Hello"));
+        assert!(!md.contains("var x=1"));
+        assert!(!md.contains("color:red"));
+    }
+
+    #[test]
+    fn json_and_plain_text_pass_through() {
+        let json = r#"{"items": ["<html> looks html but is a string value"]}"#;
+        assert_eq!(extract_text(json.into()), json);
+        let text = "plain text, no markup";
+        assert_eq!(extract_text(text.into()), text);
+    }
+
+    #[test]
+    fn html_sniff_ignores_late_html_tag() {
+        // "<html" only matters within the first KiB.
+        let body = format!("{}<html>", "x".repeat(2000));
+        assert_eq!(extract_text(body.clone()), body);
     }
 
     #[tokio::test]

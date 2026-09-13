@@ -15,7 +15,10 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown
 install-path = "CARGO_HOME"
 # Where to host releases
 hosting = "github"
-# Whether to install an updater program
-install-updater = false
+# Ship `sirbone-update` (axoupdater) next to the binary, so shell/powershell
+# installs can self-upgrade without re-running the installer. `sirbone update`
+# forwards to it (see `run_update` in src/cmd/update.rs). Homebrew/npm are not
+# enabled: both need a second repository/registry to publish into.
+install-updater = true
 # cargo-dist resolves this path from .github/workflows/.
 github-build-setup = "../dist/build-setup.yml"

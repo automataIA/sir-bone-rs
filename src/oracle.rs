@@ -14,7 +14,9 @@
 //! verification step echoes *AgentCoder* (arXiv 2312.13010).
 //!
 //! Config (`~/.sirbone/config.json`, key `oracle`):
-//! `{"test_command": "cargo test -q", "max_attempts": 3}`. No command → disabled.
+//! `{"test_command": "cargo test -q", "max_attempts": 3, "min_tests": 1}`.
+//! `min_tests` is optional and defaults to zero; set it for filtered test
+//! commands that must not accept a successful zero-test run. No command → disabled.
 
 use std::time::Duration;
 
@@ -49,6 +51,11 @@ pub enum Outcome {
 
 pub struct Oracle {
     test_command: String,
+    /// Minimum number of executed tests required for a green verdict. This is
+    /// opt-in because non-test commands (for example `cargo check`) are valid
+    /// oracle commands too. A filtered Cargo invocation can set this to `1` so
+    /// libtest's successful "0 tests" exit cannot masquerade as verification.
+    min_tests: usize,
     max_attempts: usize,
     attempts: usize,
     /// Fewest failures seen so far; `None` until the first red cycle.
@@ -58,12 +65,35 @@ pub struct Oracle {
 }
 
 impl Oracle {
+    /// Build an explicitly configured oracle. Configuration loaders should
+    /// normally use [`Self::load`]; this constructor keeps offline replays and
+    /// embedders independent from process-global project configuration.
+    pub fn new(test_command: impl Into<String>, max_attempts: usize) -> Option<Self> {
+        let test_command = test_command.into().trim().to_string();
+        if test_command.is_empty() {
+            return None;
+        }
+        Some(Self {
+            test_command,
+            min_tests: 0,
+            max_attempts: max_attempts.max(1),
+            attempts: 0,
+            best_failed: None,
+            last_snapshot: None,
+        })
+    }
+
     /// Load the `oracle` section: per-project
     /// `~/.sirbone/projects/<slug>/config.json` if it defines it, else global
     /// `~/.sirbone/config.json`. `None` = disabled (missing/malformed config, or
     /// empty `test_command`) — never an error.
     pub fn load() -> Option<Self> {
-        Self::from_value(crate::config::section("oracle").as_ref())
+        let configured = Self::from_value(crate::config::section("oracle").as_ref());
+        if crate::ablate::oracle_gate_disabled() {
+            None
+        } else {
+            configured
+        }
     }
 
     fn from_value(v: Option<&serde_json::Value>) -> Option<Self> {
@@ -76,19 +106,17 @@ impl Oracle {
             .get("max_attempts")
             .and_then(|m| m.as_u64())
             .map_or(DEFAULT_MAX_ATTEMPTS, |n| (n as usize).max(1));
-        Some(Self {
-            test_command,
-            max_attempts,
-            attempts: 0,
-            best_failed: None,
-            last_snapshot: None,
-        })
+        let min_tests = obj.get("min_tests").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+        let mut oracle = Self::new(test_command, max_attempts)?;
+        oracle.min_tests = min_tests;
+        Some(oracle)
     }
 
     /// Run one verification cycle. On red, applies rollback-on-regression and
     /// returns the feedback to inject; on green or exhaustion returns `Done`.
     pub async fn gate(&mut self, snapshots: Option<&Snapshots>, events: &EventTx) -> Outcome {
         let result = self.run_tests().await;
+        crate::telemetry::add(&crate::telemetry::ORACLE_RUNS, 1);
         if result.passed {
             notice(
                 events,
@@ -100,6 +128,7 @@ impl Oracle {
         }
 
         self.attempts += 1;
+        crate::telemetry::add(&crate::telemetry::ORACLE_FAILURES, 1);
 
         // A timeout or spawn failure carries no pass/fail signal (`failed ==
         // usize::MAX`): comparing it would always read as "regressed" and trigger
@@ -125,7 +154,8 @@ impl Oracle {
             reg
         };
 
-        if self.attempts > self.max_attempts {
+        if self.attempts >= self.max_attempts {
+            crate::telemetry::add(&crate::telemetry::ORACLE_EXHAUSTED, 1);
             // Critical: give up and hand back to the human — stays on the red
             // `Error` channel.
             error(
@@ -150,6 +180,7 @@ impl Oracle {
             )
         };
         notice(events, NoticeLevel::Info, msg).await;
+        crate::telemetry::add(&crate::telemetry::ORACLE_RETRIES, 1);
         Outcome::Retry(self.feedback(&result, regressed))
     }
 
@@ -159,6 +190,7 @@ impl Oracle {
         };
         match snaps.rollback(id).await {
             Ok(_) => {
+                crate::telemetry::add(&crate::telemetry::ORACLE_ROLLBACKS, 1);
                 notice(
                     events,
                     NoticeLevel::Info,
@@ -171,7 +203,38 @@ impl Oracle {
     }
 
     async fn run_tests(&self) -> OracleResult {
-        run_command(&self.test_command).await
+        run_command(&self.test_command, self.min_tests).await
+    }
+
+    /// Run the authoritative check once when the LLM-turn budget is exhausted.
+    ///
+    /// This deliberately cannot request another model turn: the budget remains
+    /// a hard cap. It does ensure that a correct patch is not rejected merely
+    /// because the model spent its final turn on a tool call instead of a prose
+    /// `Done`, and that a red workspace fails loudly with deterministic evidence.
+    pub(crate) async fn final_gate(&mut self, events: &EventTx) -> bool {
+        let result = self.run_tests().await;
+        crate::telemetry::add(&crate::telemetry::ORACLE_RUNS, 1);
+        if result.passed {
+            notice(
+                events,
+                NoticeLevel::Success,
+                "[oracle] final budget gate: all tests pass".into(),
+            )
+            .await;
+            true
+        } else {
+            crate::telemetry::add(&crate::telemetry::ORACLE_FAILURES, 1);
+            error(
+                events,
+                format!(
+                    "[oracle] final budget gate failed; no LLM turns remain\n\n{}",
+                    diagnostic(&result.raw)
+                ),
+            )
+            .await;
+            false
+        }
     }
 
     fn feedback(&self, result: &OracleResult, regressed: bool) -> String {
@@ -203,9 +266,27 @@ pub fn load_test_command() -> Option<String> {
     (!cmd.is_empty()).then_some(cmd)
 }
 
+/// Read `oracle.min_tests` (0 when unset), the companion of
+/// [`load_test_command`] for callers that run the command themselves.
+pub fn load_min_tests() -> usize {
+    crate::config::section("oracle")
+        .and_then(|o| o.get("min_tests").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0) as usize
+}
+
+/// Score the current work-tree, for a caller that *selects between* independent
+/// attempts instead of repairing one.
+///
+/// Same runner as the gate and the `verify` tool, deliberately: the point of
+/// best-of-K selection is that the judge is execution, not the generator
+/// grading itself. Carries no retry or rollback state.
+pub async fn score_workspace(command: &str, min_tests: usize) -> OracleResult {
+    run_command(command, min_tests).await
+}
+
 /// Run the test command once and return a verdict. Shared by the post-Done gate
 /// and the on-demand `verify` tool.
-async fn run_command(command: &str) -> OracleResult {
+async fn run_command(command: &str, min_tests: usize) -> OracleResult {
     let fut = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -228,7 +309,7 @@ async fn run_command(command: &str) -> OracleResult {
                 s.push('\n');
                 s.push_str(&err);
             }
-            parse_result(&s, out.status.success())
+            parse_result(&s, out.status.success(), min_tests)
         }
     }
 }
@@ -236,12 +317,21 @@ async fn run_command(command: &str) -> OracleResult {
 /// One-shot verification for the `verify` tool: run the configured test command
 /// and return a model-readable verdict (pass, or hoisted-diagnostic on failure).
 pub async fn verify_once() -> String {
-    let Some(cmd) = load_test_command() else {
+    verify_with_command(load_test_command()).await
+}
+
+/// Runs verification with an explicitly supplied command.
+///
+/// Keeping configuration lookup outside this core makes callers such as tests
+/// deterministic and prevents them from inheriting a user's recursive test command.
+pub(crate) async fn verify_with_command(command: Option<String>) -> String {
+    let Some(cmd) = command else {
         return "No test command configured. Set `oracle.test_command` in ~/.sirbone/config.json \
                 to enable verification."
             .into();
     };
-    let r = run_command(&cmd).await;
+    crate::telemetry::add(&crate::telemetry::VERIFY_TOOL_RUNS, 1);
+    let r = run_command(&cmd, 0).await;
     if r.passed {
         format!("✓ all tests pass (`{cmd}`)")
     } else {
@@ -282,8 +372,20 @@ fn diagnostic(raw: &str) -> String {
 /// regardless of text; on failure, count failing tests from the summary line
 /// (libtest "… N failed", pytest "N failed,", jest "N failed,"), defaulting to 1
 /// when no count is recognised.
-fn parse_result(output: &str, success: bool) -> OracleResult {
+fn parse_result(output: &str, success: bool, min_tests: usize) -> OracleResult {
     if success {
+        if min_tests > 0 {
+            let executed = count_test_summary(output);
+            if executed < min_tests {
+                return OracleResult {
+                    passed: false,
+                    failed: 1,
+                    raw: format!(
+                        "verification command executed {executed} test(s), fewer than required {min_tests}\n{output}"
+                    ),
+                };
+            }
+        }
         return OracleResult {
             passed: true,
             failed: 0,
@@ -296,6 +398,22 @@ fn parse_result(output: &str, success: bool) -> OracleResult {
         failed,
         raw: output.to_string(),
     }
+}
+
+/// Sum passed and failed tests from libtest/pytest-style summaries. This is
+/// intentionally used only when `oracle.min_tests` opts in.
+fn count_test_summary(output: &str) -> usize {
+    let toks: Vec<&str> = output.split_whitespace().collect();
+    let mut total = 0usize;
+    for (i, tok) in toks.iter().enumerate().skip(1) {
+        let label = tok.trim_end_matches([';', ',', '.']);
+        if matches!(label, "passed" | "failed") {
+            if let Ok(n) = toks[i - 1].parse::<usize>() {
+                total = total.saturating_add(n);
+            }
+        }
+    }
+    total
 }
 
 /// Sum every `<n> failed` occurrence (libtest prints one per test binary).
@@ -333,6 +451,7 @@ mod tests {
             .expect("loads");
         assert_eq!(o.test_command, "cargo test -q");
         assert_eq!(o.max_attempts, 5);
+        assert_eq!(o.min_tests, 0);
         // Defaults + disabling cases.
         assert_eq!(
             cfg(r#"{"oracle": {"test_command": "x"}}"#)
@@ -351,6 +470,12 @@ mod tests {
                 .unwrap()
                 .max_attempts,
             1
+        );
+        assert_eq!(
+            cfg(r#"{"oracle": {"test_command": "x", "min_tests": 2}}"#)
+                .unwrap()
+                .min_tests,
+            2
         );
     }
 
@@ -373,13 +498,24 @@ mod tests {
     #[test]
     fn parse_result_trusts_exit_status() {
         // Clean exit is a pass even if the word "failed" appears in output.
-        let r = parse_result("0 failed", true);
+        let r = parse_result("0 failed", true, 0);
         assert!(r.passed && r.failed == 0);
         // Non-zero exit with no count defaults to one failure.
-        let r = parse_result("compilation error", false);
+        let r = parse_result("compilation error", false, 0);
         assert!(!r.passed && r.failed == 1);
-        let r = parse_result("1 passed; 2 failed", false);
+        let r = parse_result("1 passed; 2 failed", false, 0);
         assert_eq!(r.failed, 2);
+    }
+
+    #[test]
+    fn minimum_test_count_rejects_a_green_zero_test_filter() {
+        let zero = "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored";
+        let r = parse_result(zero, true, 1);
+        assert!(!r.passed);
+        assert!(r.raw.contains("executed 0 test(s)"), "{}", r.raw);
+
+        let one = "running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored";
+        assert!(parse_result(one, true, 1).passed);
     }
 
     #[test]
