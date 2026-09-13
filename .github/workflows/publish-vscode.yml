@@ -36,7 +36,11 @@ jobs:
       - name: Package .vsix
         run: npx --yes @vscode/vsce package -o sirbone-vscode.vsix
 
+      # Optional too: only runs if the OPEN_VSX_TOKEN secret is set, mirroring
+      # the Marketplace step below (tag pushes must not fail just because no
+      # publish credentials are configured on the repo).
       - name: Publish to Open VSX
+        if: ${{ env.OPEN_VSX_TOKEN != '' }}
         uses: HaaLeo/publish-vscode-extension@v2
         with:
           pat: ${{ env.OPEN_VSX_TOKEN }}

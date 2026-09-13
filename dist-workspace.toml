@@ -22,3 +22,7 @@ hosting = "github"
 install-updater = true
 # cargo-dist resolves this path from .github/workflows/.
 github-build-setup = "../dist/build-setup.yml"
+# release.yml carries a hand-applied idempotency patch (re-cutting an existing
+# tag must update the release, not fail on `gh release create`); this silences
+# dist's generated-CI-up-to-date check, which would otherwise reject the edit.
+allow-dirty = true

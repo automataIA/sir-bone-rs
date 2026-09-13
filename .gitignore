@@ -6,7 +6,10 @@ target
 # Editor / IDE build output (source lives in editors/vscode/src)
 node_modules/
 editors/vscode/out/
+# The extension's lockfile is tracked (npm ci needs it in CI); only stray
+# lockfiles elsewhere stay ignored.
 package-lock.json
+!editors/vscode/package-lock.json
 editors/vscode/*.vsix
 
 # OS
