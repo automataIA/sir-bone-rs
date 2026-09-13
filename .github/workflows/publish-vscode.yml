@@ -59,9 +59,19 @@ jobs:
           skipDuplicate: true
 
       # Also attach the .vsix to the GitHub Release that cargo-dist creates for
-      # this tag, so it can be installed manually too.
+      # this tag, so it can be installed manually too. Plain gh instead of
+      # softprops/action-gh-release: on a pre-existing release its update call
+      # 403s ("Resource not accessible by integration"), while `gh release
+      # upload --clobber` to the same release is proven to work with
+      # GITHUB_TOKEN (release.yml's dist upload does exactly that).
       - name: Attach .vsix to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: editors/vscode/sirbone-vscode.vsix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # First cut of the tag: the cargo-dist release may not exist yet (the
+          # two workflows run in parallel); create a stub for it to fill later.
+          gh release view "$GITHUB_REF_NAME" --json id --jq .id >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes ""
+          gh release upload "$GITHUB_REF_NAME" --clobber editors/vscode/sirbone-vscode.vsix
