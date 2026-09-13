@@ -1260,6 +1260,7 @@ mod tests {
 
     #[test]
     fn thinking_budget_reported_only_for_glm() {
+        init_crypto();
         let glm = OpenAiClient::new("https://api.z.ai/api/coding/paas/v4", "k", "glm-5.2");
         glm.set_thinking_budget(Some(16000));
         assert_eq!(glm.thinking_budget(), Some(16000));

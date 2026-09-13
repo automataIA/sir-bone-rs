@@ -16,6 +16,12 @@
 mod app;
 mod types;
 
+// Pure-data shims for the crate-root paths the #[path]-included render modules
+// reference (`crate::agent`, `crate::tools`); same "keep in sync" pattern as
+// `types.rs` — data types only, the tokio-bound originals stay out of wasm.
+mod agent;
+mod tools;
+
 #[path = "../../../src/tui/theme.rs"]
 mod theme;
 #[path = "../../../src/tui/boar.rs"]

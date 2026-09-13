@@ -27,7 +27,6 @@ bench/
 .playwright-cli/
 info/
 target-bench/
-src/tui/snapshots/*.snap
 sirbone-lab/
 
 # The benchmark harnesses stay local: `bench/` is ignored wholesale by the rule

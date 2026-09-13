@@ -12,16 +12,17 @@ use ratatui::{
 use ratzilla::event::KeyCode;
 
 // The real TUI render layer, pulled in by `#[path]` from ../../../src/tui/ — see main.rs.
+use crate::agent::{Prompt, PromptKind};
 use crate::boar::{load_boar, BoarAnim, BrailleWidget};
 use crate::diff::edit_diff_block;
 use crate::markdown::md_to_lines;
 use crate::theme::{ctx_usage_color, Palette, PALETTES};
 use crate::types::{AgentEvent, NoticeLevel};
 use crate::widgets::{
-    fmt_elapsed, job_gauge, kb_combo, kb_single, out_preview_rows, render_confirm_dialog,
+    fmt_elapsed, job_gauge, kb_combo, kb_single, out_preview_rows, render_prompt_dialog,
     render_scroll_indicators, running_tool_block, thread_blank, thread_wrap, timeline_entry_lines,
-    timeline_tree_parts, tool_box_row, tool_box_top, user_box, wrap_text, KB_PANEL_W, THREAD_GUTTER,
-    TIMELINE_W,
+    timeline_tree_parts, tool_box_row, tool_box_top, user_box, wrap_text, PromptUi, KB_PANEL_W,
+    THREAD_GUTTER, TIMELINE_W,
 };
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -705,7 +706,7 @@ pub struct MockApp {
     pending: String,
     input: String,
     focus: Focus,
-    scroll: u16,
+    scroll: usize,
     auto_scroll: bool,
     spinner_tick: u64,
     busy: bool,
@@ -741,15 +742,15 @@ pub struct MockApp {
     trail_scroll: u16,
     trail_max_scroll: u16,
     hover_divider: bool,
-    scroll_to: Option<u16>,
+    scroll_to: Option<usize>,
     selected_entry: Option<usize>,
     popup: Option<MockPopup>,
     chat_area: Rect,
-    max_scroll: u16,
+    max_scroll: usize,
     palette_idx: usize,
     palette: &'static Palette,
     thread_active: bool,
-    confirm_request: Option<String>,
+    prompt: Option<PromptUi>,
     plan: bool,
     oracle: bool,
     // Terminal size, refreshed each frame from `f.area()` (no crossterm on web).
@@ -809,7 +810,7 @@ impl MockApp {
             palette_idx: 0,
             palette: &PALETTES[0].1,
             thread_active: false,
-            confirm_request: None,
+            prompt: None,
             plan: false,
             oracle: false,
             term_w: 80,
@@ -854,8 +855,9 @@ impl MockApp {
         }
 
         // Pending approval: auto-dismiss after 2s in mock mode.
-        if let Some(req) = self.confirm_request.take() {
-            self.processed.push(MockEv::Confirm(req.leak()));
+        if let Some(ui) = self.prompt.take() {
+            let cmd = ui.prompt.detail.clone().unwrap_or_default();
+            self.processed.push(MockEv::Confirm(cmd.leak()));
         }
         // Run a queued command once the agent goes idle (mirrors tui.rs).
         if !self.busy {
@@ -870,7 +872,16 @@ impl MockApp {
             // Confirm is interactive-only: don't record it, or replay() (palette
             // switch, boar toggle) would re-open an already-answered dialog.
             if let MockEv::Confirm(cmd) = &ev {
-                self.confirm_request = Some(cmd.to_string());
+                let prompt = Prompt {
+                    title: "permission required".into(),
+                    detail: Some(cmd.to_string()),
+                    options: vec!["Allow once".into(), "Allow always".into(), "Deny".into()],
+                    allow_free_text: true,
+                    kind: PromptKind::Permission {
+                        suggested_glob: format!("Bash({cmd})"),
+                    },
+                };
+                self.prompt = Some(PromptUi::new(prompt));
                 break;
             }
             self.processed.push(ev.clone());
@@ -1269,9 +1280,8 @@ impl MockApp {
             tail.extend(thread_wrap(blk, true, p));
         }
         let total_n = self.lines.len() + tail.len();
-        let total = total_n as u16;
-        let viewport = chat_area.height.saturating_sub(2);
-        let max_scroll = total.saturating_sub(viewport);
+        let viewport = chat_area.height.saturating_sub(2) as usize;
+        let max_scroll = total_n.saturating_sub(viewport);
         self.max_scroll = max_scroll;
         // Keep self.scroll in sync with the screen (mirrors tui.rs). A trail-click
         // jump (`scroll_to`) pins its target to the top, past max_scroll.
@@ -1284,8 +1294,8 @@ impl MockApp {
             self.scroll.min(max_scroll)
         };
         let scroll = self.scroll;
-        let start = scroll as usize;
-        let end = (start + viewport as usize).min(total_n);
+        let start = scroll;
+        let end = (start + viewport).min(total_n);
         let visible: Vec<Line<'static>> = (start..end)
             .map(|i| {
                 if i < self.lines.len() {
@@ -1407,8 +1417,8 @@ impl MockApp {
 
         self.render_info_bar(f, info_area);
         self.render_popup(f);
-        if let Some(cmd) = &self.confirm_request {
-            render_confirm_dialog(f, cmd, self.palette);
+        if let Some(ui) = &self.prompt {
+            render_prompt_dialog(f, ui, self.palette);
         }
     }
 
@@ -1429,7 +1439,7 @@ impl MockApp {
         let rows = inner.height as usize;
         let w = inner.width as usize;
         let selected = self.selected_entry.or_else(|| self.timeline.iter()
-            .rposition(|e| e.target <= self.scroll as usize));
+            .rposition(|e| e.target <= self.scroll));
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut owners: Vec<usize> = Vec::new();
@@ -1698,9 +1708,20 @@ impl MockApp {
             }
             return;
         }
-        if self.confirm_request.is_some() {
-            if matches!(code, KeyCode::Char('y' | 'Y' | 'n' | 'N') | KeyCode::Esc) {
-                self.confirm_request = None;
+        // ── prompt dialog intercept (mirrors mock_tui.rs) ──────────────────
+        if let Some(ui) = &mut self.prompt {
+            match code {
+                KeyCode::Char(c) if ui.editing => ui.push_char(c),
+                KeyCode::Backspace if ui.editing => ui.backspace(),
+                KeyCode::Esc if ui.editing => ui.editing = false,
+                KeyCode::Enter if ui.editing => self.prompt = None,
+                KeyCode::Up => ui.up(),
+                KeyCode::Down => ui.down(),
+                KeyCode::Char('e') => {
+                    ui.begin_edit();
+                }
+                KeyCode::Enter | KeyCode::Esc => self.prompt = None,
+                _ => {}
             }
             return;
         }

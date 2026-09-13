@@ -1,0 +1,29 @@
+---
+source: src/tui/run.rs
+assertion_line: 2221
+expression: render(&mut app)
+---
+"┌ sirbone ───────────────────────────────────────┐╭ Chronika ──────────────────╮"
+"│                                                ││▌ fix the parser bug        │"
+"│  ▌ fix the parser bug                          ││ ├ ● todo                   │"
+"│                                                ││ └ ● bash                   │"
+"│  ● On it — planning first.                     ││                            │"
+"│  │                                             ││                            │"
+"│  ● ▸ todo                                      ││                            │"
+"│  │     ✔ read the failing test                 ││                            │"
+"│  │     ❯ patch the parser                      ││                            │"
+"│  │     ☐ run the suite                         ││                            │"
+"│  │                                             ││                            │"
+"│  ● ▸ bash                                      ││                            │"
+"│  │ IN  cargo test                              ││                            │"
+"│  │ OUT ✓ test result: ok. 12 passed            ││                            │"
+"│                                                ││                            │"
+"│                                                ││                            │"
+"│                                                ││                            │"
+"│                                                ││                            │"
+"└────────────────────────────────────────────────┘╰────────────────────────────╯"
+" ⠋ t Tab focus  ↑↓ scroll  ⌥B trail  ⌥P palette  ⌥A about  ⌥S settings  ^C quit "
+"╭ › ───────────────────────────────────────────────────────────────────────────╮"
+"│                                                                              │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"  anthropic  ·  claude-opus  ·  ctx ░░░░░░░░░░ 0%  ·  theme:sirbone             "

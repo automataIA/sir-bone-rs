@@ -1,0 +1,29 @@
+---
+source: src/tui/run.rs
+assertion_line: 2230
+expression: render(&mut app)
+---
+"┌ settings ────────────────────────────────────────────────────────────────────┐"
+"│                                                                              │"
+"│  ›  Localize pre-pass:  ON                                                   │"
+"│        Run the localization pre-pass before each turn.                       │"
+"│     Plan mode:  OFF                                                          │"
+"│     Oracle gate:  OFF                                                        │"
+"│     Quota window bar:  ON                                                    │"
+"│     Thinking budget:  off                                                    │"
+"│     Skills                                                                   │"
+"│     MCP                                                                      │"
+"│                                                                              │"
+"│  provider / model (read-only, set via env):                                  │"
+"│    anthropic · claude-opus                                                   │"
+"│                                                                              │"
+"│  ↑↓ move · ←/→/space toggle · esc → chat                                     │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"└──────────────────────────────────────────────────────────────────────────────┘"

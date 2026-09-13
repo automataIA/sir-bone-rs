@@ -847,7 +847,7 @@ mod tests {
     use super::{fmt_tok, todo_block, PromptUi};
     use crate::agent::{Prompt, PromptKind, PromptQuestion};
     use crate::tools::{TodoItem, TodoStatus};
-    use crate::tui::theme::PALETTES;
+    use super::super::theme::PALETTES;
 
     #[test]
     fn todo_block_marks_and_strikethrough() {

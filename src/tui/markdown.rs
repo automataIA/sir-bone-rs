@@ -230,7 +230,7 @@ pub fn md_to_lines(md: &str, width: usize, palette: &'static Palette) -> Vec<Lin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::PALETTES;
+    use super::super::theme::PALETTES;
 
     #[test]
     fn synoptic_highlights_known_language() {
