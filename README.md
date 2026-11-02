@@ -105,10 +105,11 @@ auto-detected: `SIRBONE_CODEX=1` → ChatGPT/Codex, then `ANTHROPIC_AUTH_TOKEN` 
 else `OPENAI_API_KEY` (with `OPENAI_BASE_URL` for Ollama, Groq, z.ai, …). Full walkthrough in
 [getting started](docs-site/book/src/getting-started.md).
 
-To use a ChatGPT Plus/Pro subscription instead of API billing, install the official Codex CLI,
-run `sirbone login --codex`, then start Sir Bone with `SIRBONE_CODEX=1 sirbone`. This delegates
-the turn to Codex and keeps its OAuth credentials under Codex's control; Sir Bone does not treat
-the subscription as an `OPENAI_API_KEY`.
+To use a ChatGPT Plus/Pro subscription instead of API billing, run `sirbone login --codex`
+(Sir Bone's own OAuth flow — no Codex CLI needed), then start Sir Bone with `SIRBONE_CODEX=1
+sirbone`. Tokens live in `~/.sirbone/codex-auth.json` and turn requests go straight to the
+Codex backend, so Sir Bone's own tool loop, permissions and compaction all apply; the
+subscription is never treated as an `OPENAI_API_KEY`.
 
 **Deterministic verification**: `sirbone setup-verification` reads Rust/Python/Node manifests
 offline, previews the exact config patch, and writes only after confirmation — no LLM, no network.
@@ -178,6 +179,21 @@ guardrail fails `cargo test trust_matrix` instead of silently shipping.
   the project has an authoritative test command. (`doc_search`/`rag` were removed after a bench
   showed grep dominates them on recall and token cost — see
   [BENCH_DECISIONS](docs/BENCH_DECISIONS.md).)
+- **Navigation on demand** — `code_map` can suggest affected tests, inspect Rust
+  function bodies, or collect symbol evidence under a byte budget. Example inputs:
+
+  ```json
+  {"op":"affected_tests","files":["src/structure.rs"],"max_depth":3}
+  {"op":"inspect","path":"src/structure.rs","symbol":"usage_chain"}
+  {"op":"context","symbol":"usage_chain","max_bytes":6000}
+  ```
+
+  Test candidates include shortest file-dependency paths and are advisory; keep
+  the normal test gate. Rust inspection reports syntax, leaves methods unresolved
+  and macros unexpanded, and labels textual fallback on parse failure. Context
+  prioritizes declarations, tests, references and dependents, with omission notices.
+  These views run only when requested; their effect on task cost is not yet measured.
+  Offline evidence/byte probe: `cargo run --example code_map_navigation_probe -- /tmp/navigation.jsonl`.
 - **Two providers, one trait** — Anthropic (SSE + prompt caching + extended thinking) and
   OpenAI-compatible (`async-openai`), both with classified retry/backoff and secret redaction.
 - **MCP** — generic stdio client; servers declared in `~/.sirbone/mcp.json`, enabled per project;

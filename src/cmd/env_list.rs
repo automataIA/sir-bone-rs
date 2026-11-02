@@ -29,17 +29,12 @@ const VARS: &[(&str, &str, bool)] = &[
     ),
     (
         "SIRBONE_CODEX",
-        "1 = use ChatGPT Plus/Pro through the official Codex CLI OAuth session",
-        false,
-    ),
-    (
-        "SIRBONE_CODEX_SANDBOX",
-        "Codex CLI sandbox: read-only, workspace-write (default), or danger-full-access",
+        "1 = use ChatGPT Plus/Pro via Sir Bone's own OAuth login (`sirbone login --codex`)",
         false,
     ),
     (
         "SIRBONE_CODEX_REASONING",
-        "Codex CLI reasoning effort override (e.g. low) — else ~/.codex/config.toml decides",
+        "Codex backend reasoning effort override (low/medium/high) — else the backend default",
         false,
     ),
     (
@@ -202,6 +197,16 @@ const VARS: &[(&str, &str, bool)] = &[
         false,
     ),
     (
+        "SIRBONE_SHELL_ROUTE",
+        "1 = a bash `grep -r`/`rg` for a bare identifier also gets grep's structural view (A/B inconclusive; off by default)",
+        false,
+    ),
+    (
+        "SIRBONE_MENTIONS",
+        "tags = references view prefixes mentions in comments/strings; filter = code_map find_references gains code_only (A/B arms, unset = off)",
+        false,
+    ),
+    (
         "SIRBONE_REF_RANK",
         "1 = code_map find_references spends its extra detail on the most-matched files instead of by path (every file stays visible either way)",
         false,
@@ -219,7 +224,7 @@ const VARS: &[(&str, &str, bool)] = &[
     ),
     (
         "SIRBONE_DISABLE",
-        "Feature ablation: hook:{pre,post,stop,ledger}, oracle:gate, ask:rounds, read:outline, stream:rules, tool:spill, test:notice",
+        "Feature ablation: hook:{pre,post,stop,ledger}, oracle:gate, ask:rounds, read:outline, grep:route, stream:rules, tool:spill, test:notice",
         false,
     ),
     (

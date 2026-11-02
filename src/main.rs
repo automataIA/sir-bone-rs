@@ -834,7 +834,16 @@ async fn main() -> Result<()> {
 
     // Model precedence: --model/SIRBONE_MODEL → last model used in this project →
     // provider-appropriate default (the provider is decided by which key is set).
-    let model = cli.model.or_else(|| meta.model.clone()).unwrap_or_else(|| {
+    // On the Codex path an id from another provider family (a GLM/Claude model
+    // arriving via a project .env or the project meta) can only be a 400 from
+    // the backend, so it falls through to `auto`.
+    let codex_compatible =
+        |m: &String| !cli.codex || m.starts_with("gpt") || m.contains("codex");
+    let model = cli
+        .model
+        .filter(codex_compatible)
+        .or_else(|| meta.model.clone().filter(codex_compatible))
+        .unwrap_or_else(|| {
         if cli.codex {
             "auto"
         } else if anthropic_key.is_some() {
@@ -856,7 +865,7 @@ async fn main() -> Result<()> {
         bail!("--temperature is not supported with --codex (Codex CLI owns sampling)");
     }
     let (client, provider, images_ok): (Arc<dyn LlmClient>, &str, bool) = if cli.codex {
-        (Arc::new(CodexClient::new(&model, &cwd)), "codex", false)
+        (Arc::new(CodexClient::new(&model)), "codex", false)
     } else if let Some(key) = anthropic_key {
         let base = cli
             .anthropic_base_url

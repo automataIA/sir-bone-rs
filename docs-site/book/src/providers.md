@@ -2,7 +2,7 @@
 
 Sir Bone picks a provider from environment variables, in priority order:
 
-1. `SIRBONE_CODEX=1` → **ChatGPT Plus/Pro through the official Codex CLI**
+1. `SIRBONE_CODEX=1` → **ChatGPT Plus/Pro (native OAuth + Codex backend)**
 2. `ANTHROPIC_AUTH_TOKEN` set → **Anthropic**
 3. else `OPENAI_API_KEY` set → **OpenAI / OpenAI-compatible**
 
@@ -11,22 +11,31 @@ The model is chosen with `SIRBONE_MODEL`.
 ## ChatGPT Plus/Pro (Codex OAuth)
 
 ChatGPT subscriptions and OpenAI API billing are separate. To use a Plus/Pro
-subscription, install the official Codex CLI and authenticate it in the browser:
+subscription, run Sir Bone's own OAuth flow — no Codex CLI needed:
 
 ```bash
 sirbone login --codex
 SIRBONE_CODEX=1 sirbone
 ```
 
-You can also use `sirbone login codex` or `sirbone --codex`. Sir Bone delegates
-the turn to `codex exec --json`; it never reads or stores the Codex OAuth token.
-In this mode Codex owns the model/tool execution, so Sir Bone's own API-key
-client and tool-confirmation pipeline are not used.
+You can also use `sirbone login codex` or `sirbone --codex`. Login opens the
+browser on auth.openai.com (PKCE, same access path OpenAI endorses for
+third-party harnesses via its "Codex for OSS" program) and stores the tokens in
+`~/.sirbone/codex-auth.json` (chmod 600); they refresh automatically. If the
+automatic callback capture is unavailable (headless), paste the redirect URL or
+the code when asked. Model turns go straight to the Codex backend
+(`chatgpt.com/backend-api/codex/responses`), so Sir Bone owns the tool loop:
+its permission prompts, retry policy and compaction all apply. Because of that,
+no `codex` binary and no `SIRBONE_CODEX_SANDBOX` are involved anymore.
 
-Codex uses its `workspace-write` sandbox by default. If Sir Bone already runs
-inside a trusted outer sandbox that prevents nested Linux namespaces, set
-`SIRBONE_CODEX_SANDBOX=danger-full-access`. This disables only Codex's inner
-sandbox, so use it only when the outer sandbox provides the intended boundary.
+Model ids come from the live catalog (`/model` inside Sir Bone lists them):
+`gpt-6-astra`, `gpt-5.6-sol`/`-terra`/`-luna`, `gpt-5.5` (checked 2026-09-17 —
+note that plain `gpt-5.6` and `gpt-5.6-codex` are *not* valid slugs). The
+default `auto` picks the newest catalog model at runtime, with an offline
+fallback constant; the project-persisted and `SIRBONE_MODEL` ids of other
+provider families (GLM, Claude) are ignored on this path instead of hitting a
+backend 400. `SIRBONE_CODEX_REASONING` maps onto the backend's reasoning
+effort (`low`/`medium`/`high`).
 
 ## Anthropic
 

@@ -81,6 +81,9 @@ tui-logger   = { version = "0.17.3", default-features = false, features = ["trac
 futures      = "0.3"
 similar      = "2"
 regex        = "1"
+# Explicit Rust inspection only; reuse versions already present in the lockfile.
+syn          = { version = "2.0.117", features = ["full", "visit"] }
+proc-macro2  = { version = "1.0.106", features = ["span-locations"] }
 glob         = "0.3"
 ignore       = "0.4"
 url          = "2"
@@ -93,6 +96,8 @@ clap         = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 clap_mangen  = "0.2"
 base64       = "0.22"
+sha2         = "0.10"
+getrandom    = "0.3"
 dirs         = "5"
 uuid         = { version = "1", features = ["v4"] }
 chrono       = { version = "0.4", features = ["serde"] }

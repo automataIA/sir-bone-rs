@@ -1,9 +1,10 @@
 //! `sirbone login` — interactive credential wizard. Picks a provider preset
 //! (base URL + which env var + Anthropic/OpenAI path), writes `~/.sirbone/.env`
 //! (chmod 600), and pings the endpoint to confirm the key works. Every preset
-//! rides one of the two API clients, while ChatGPT Plus/Pro uses the official
-//! Codex CLI OAuth flow. Falls back to seeding the template when stdin is not a
-//! TTY (CI/headless).
+//! rides one of the two API clients, while ChatGPT Plus/Pro runs Sir Bone's own
+//! OAuth flow (the Codex-for-OSS access path) and stores tokens in
+//! `~/.sirbone/codex-auth.json`. Falls back to seeding the template when stdin
+//! is not a TTY (CI/headless).
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
@@ -12,25 +13,49 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use sirbone::{
     agent::LlmClient,
-    ai::{redact_secrets, AnthropicClient, OpenAiClient},
+    ai::{codex, redact_secrets, AnthropicClient, OpenAiClient},
     config,
 };
 
-/// Authenticate the official Codex CLI with a ChatGPT Plus/Pro account.
-/// Sir Bone intentionally does not read or persist the OAuth refresh token.
+/// Authenticate Sir Bone with a ChatGPT Plus/Pro account: PKCE browser flow
+/// against auth.openai.com, credentials kept in `~/.sirbone/codex-auth.json`.
 pub async fn login_codex() -> Result<()> {
-    println!("Starting the official Codex login flow…");
-    println!("Choose ‘Sign in with ChatGPT’ in the browser, then return here.");
-    let status = tokio::process::Command::new("codex")
-        .arg("login")
-        .status()
-        .await
-        .context("start `codex login` (install the official Codex CLI first)")?;
-    if !status.success() {
-        anyhow::bail!("`codex login` exited with status {status}");
-    }
-    println!("ChatGPT/Codex authentication completed. Verify with `codex login status`.");
+    let (url, verifier, state) = codex::oauth_login_url();
+    println!("Opening the ChatGPT login page — choose ‘Sign in with ChatGPT’:\n\n  {url}\n");
+    open_browser(&url);
+    let callback_state = state.clone();
+    let code = match tokio::task::spawn_blocking(move || codex::wait_for_callback(&callback_state)).await {
+        Ok(Ok(code)) => code,
+        _ => {
+            println!("Automatic capture unavailable — paste here the URL the browser\nlanded on (http://localhost:1455/auth/callback?…), or the code:");
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            codex::code_from_pasted_url(line.trim(), &state)?
+        }
+    };
+    let auth = codex::exchange_code(&code, &verifier).await?;
+    codex::save_auth(&auth)?;
+    let path = config::codex_auth_path().context("HOME is not set")?;
+    println!("ChatGPT Plus/Pro login complete — credentials saved to {}.", path.display());
     Ok(())
+}
+
+/// Best-effort browser launch; the printed URL is the real fallback.
+fn open_browser(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "cmd"
+    } else {
+        "xdg-open"
+    };
+    let mut command = std::process::Command::new(opener);
+    if cfg!(windows) {
+        command.args(["/C", "start", url]);
+    } else {
+        command.arg(url);
+    }
+    let _ = command.spawn();
 }
 
 /// Where a preset's base URL comes from.

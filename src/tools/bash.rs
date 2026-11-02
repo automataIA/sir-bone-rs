@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -118,18 +118,44 @@ impl TypedTool for BashTool {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        let result = match (!stdout.is_empty(), !stderr.is_empty()) {
+        // A plain recursive search for a bare identifier gets the structural view
+        // the `grep` tool gives it (see `grep::shell_structural_view`).
+        if output.status.success() && stderr.is_empty() {
+            if let Some(view) = super::grep::shell_structural_view(&input.command, &stdout).await {
+                return Ok(truncate_default(view));
+            }
+        }
+        let body = match (!stdout.is_empty(), !stderr.is_empty()) {
             (true, true) => format!("{stdout}\n{stderr}"),
             (true, false) => stdout.into_owned(),
             (false, true) => stderr.into_owned(),
-            (false, false) if !output.status.success() => {
-                format!("exit code: {}", output.status.code().unwrap_or(-1))
-            }
             (false, false) => String::new(),
         };
+        // Failure status goes last and survives truncation: output alone (e.g. a
+        // compiler's diagnostics) does not tell the agent the command failed.
+        let status = match (output.status.code(), signal(output.status)) {
+            (Some(0), _) => None,
+            (Some(code), _) => Some(format!("exit code: {code}")),
+            (None, Some(sig)) => Some(format!("killed by signal {sig}")),
+            (None, None) => Some("exit code: -1".to_string()),
+        };
 
-        Ok(truncate_default(result))
+        Ok(match (status, body.is_empty()) {
+            (None, _) => truncate_default(body),
+            (Some(s), true) => s,
+            (Some(s), false) => format!("{}\n{s}", truncate_default(body).trim_end()),
+        })
     }
+}
+
+#[cfg(unix)]
+fn signal(status: ExitStatus) -> Option<i32> {
+    std::os::unix::process::ExitStatusExt::signal(&status)
+}
+
+#[cfg(not(unix))]
+fn signal(_: ExitStatus) -> Option<i32> {
+    None
 }
 
 #[cfg(test)]
@@ -162,6 +188,52 @@ mod tests {
             .await
             .unwrap();
         assert!(result.contains("err"));
+    }
+
+    // A failing command that prints (every compiler error) must still say it
+    // failed: output alone does not tell the agent the exit status.
+    #[tokio::test]
+    async fn bash_nonzero_exit_with_output_reports_code() {
+        let tool = BashTool::default();
+        let result = tool
+            .run(BashInput {
+                command: "echo out; echo err >&2; exit 3".into(),
+                timeout_ms: 5000,
+                background: false,
+            })
+            .await
+            .unwrap();
+        assert!(result.contains("out") && result.contains("err"), "{result}");
+        assert!(result.trim_end().ends_with("exit code: 3"), "{result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_signal_termination_is_reported() {
+        let tool = BashTool::default();
+        let result = tool
+            .run(BashInput {
+                command: "echo partial; kill -9 $$".into(),
+                timeout_ms: 5000,
+                background: false,
+            })
+            .await
+            .unwrap();
+        assert!(result.contains("killed by signal 9"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn bash_success_has_no_exit_line() {
+        let tool = BashTool::default();
+        let result = tool
+            .run(BashInput {
+                command: "echo ok".into(),
+                timeout_ms: 5000,
+                background: false,
+            })
+            .await
+            .unwrap();
+        assert!(!result.contains("exit code"), "{result}");
     }
 
     #[tokio::test]

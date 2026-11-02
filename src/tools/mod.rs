@@ -40,6 +40,11 @@ pub trait TypedTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     async fn run(&self, input: Self::Input) -> Result<String>;
+    /// The JSON schema shown to the model; a tool overrides it only to hide a
+    /// parameter that its current configuration does not honour.
+    fn input_schema(&self) -> serde_json::Value {
+        schemars::schema_for!(Self::Input).into()
+    }
 
     /// Override to declare a mutation target (see [`DynTool::mutation_target`]).
     fn mutation_target(&self, _args: &serde_json::Value) -> Option<PathBuf> {
@@ -56,7 +61,7 @@ impl<T: TypedTool> DynTool for T {
         T::description(self)
     }
     fn schema(&self) -> serde_json::Value {
-        schemars::schema_for!(T::Input).into()
+        T::input_schema(self)
     }
     async fn call(&self, args: serde_json::Value) -> Result<String> {
         let input: T::Input = serde_json::from_value(args)?;

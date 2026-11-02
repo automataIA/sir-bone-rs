@@ -117,6 +117,13 @@ pub fn ref_budget_disabled() -> bool {
     env_has("code_map", "ref_budget")
 }
 
+/// `grep:route` — stop answering a bare whole-word symbol grep with the
+/// `code_map find_references` view. The control arm for that routing: grep
+/// then returns its plain matching lines, as before.
+pub fn grep_route_disabled() -> bool {
+    env_has("grep", "route")
+}
+
 /// `stream:rules` — turn configured mid-stream rules off.
 pub fn stream_rules_disabled() -> bool {
     env_has("stream", "rules")

@@ -34,6 +34,13 @@ pub fn global_env_path() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".sirbone/.env"))
 }
 
+/// ChatGPT/Codex OAuth credentials (`~/.sirbone/codex-auth.json`). Kept out of
+/// `.env` because `write_env()` regenerates that file from scratch on every
+/// login and would clobber the token.
+pub fn codex_auth_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".sirbone/codex-auth.json"))
+}
+
 /// The bundled `.env` template, embedded so the installed binary can seed it
 /// without the repo checkout present (see `ensure_global_env`).
 pub const ENV_TEMPLATE: &str = include_str!("../.env.example");
@@ -114,7 +121,7 @@ pub fn update_project_config(
     Ok(path)
 }
 
-fn write_json_atomic(path: &Path, value: &Value) -> std::io::Result<()> {
+pub(crate) fn write_json_atomic(path: &Path, value: &Value) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

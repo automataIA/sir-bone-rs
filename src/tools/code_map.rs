@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -6,12 +7,15 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::{truncate::truncate_default, TypedTool};
-use crate::structure::{self, Index};
+use crate::structure::{self, mentions, Index};
+
+#[deny(clippy::unwrap_used)]
+mod navigation;
 
 // Op semantics live in `description()`, not in doc comments: schemars copies doc
 // comments into the JSON schema, so documenting them twice ships the same prose
 // to the model twice on every turn (the schema rides the cached prefix).
-#[derive(Deserialize, JsonSchema, Default)]
+#[derive(Clone, Copy, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
     // Project symbol map: every supported file with the symbols it declares.
@@ -27,18 +31,34 @@ pub enum Op {
     Graph,
     // Transitive "who uses `symbol`": the upstream usage chain, by hop depth.
     Chain,
+    AffectedTests,
+    Inspect,
+    Context,
 }
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct CodeMapInput {
     #[serde(default)]
     pub op: Op,
-    /// Required by find_references, callers, callees and chain.
+    /// Required by references, callers, callees, chain and context; optional filter for inspect.
     #[serde(default)]
     pub symbol: Option<String>,
-    /// Restricts op=list to files under this directory or path prefix.
+    /// Directory prefix for list; required root-relative Rust file for inspect.
     #[serde(default)]
     pub path: Option<String>,
+    /// Changed root-relative files for affected_tests (up to 64).
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Reverse dependency depth for affected_tests/context (default 3, maximum 10).
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+    /// Output byte budget for affected_tests/inspect/context (512..24000, default 12000).
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+    /// find_references only: true keeps mentions in code, dropping those in
+    /// comments, string literals and non-source files.
+    #[serde(default)]
+    pub code_only: bool,
 }
 
 /// Signature listing budget, in chars. Half of [`truncate::DEFAULT_MAX_BYTES`]:
@@ -48,6 +68,39 @@ pub struct CodeMapInput {
 /// cap, so before the budget existed every `list` call returned an alphabetically
 /// truncated map with no indication of what was missing.
 const LIST_BUDGET_CHARS: usize = super::truncate::DEFAULT_MAX_BYTES / 2;
+
+const DESCRIPTION: &str =
+    "Map the codebase without reading files. Use before editing an unfamiliar \
+    symbol, to find where it lives and what breaks if you change it. \
+    op=list (default): every source file with the signatures it declares — \
+    scope it with path=\"<dir>\"; a repo too large to list falls back to \
+    symbol counts per file. \
+    op=find_references: every mention of `symbol` (whole-word) as \
+    path:line:code, so you can judge the call sites without opening the files; \
+    searches every text file, not just parsed sources. \
+    op=callers: the file defining `symbol`, plus the files that use it. \
+    op=callees: files the definer of `symbol` depends on. \
+    op=graph: whole-project file→file dependency graph. \
+    op=chain: transitive users of `symbol`, grouped by hop distance. \
+    op=affected_tests: advisory test candidates for changed files, with dependency paths. \
+    op=inspect: Rust function spans and syntactic calls in path; no semantic resolution. \
+    op=context: declarations, tests, references and dependency paths under one budget. \
+    Matches by name, so a mention in a comment or string can over-report.";
+
+static DESCRIPTION_TAGS: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{DESCRIPTION} In find_references, a mention inside a comment or string literal \
+         is prefixed [comment] or [string], and a file listed without lines says when \
+         none of its mentions is in code."
+    )
+});
+
+static DESCRIPTION_FILTER: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{DESCRIPTION} find_references with code_only=true keeps only mentions in code, \
+         dropping comments, string literals and non-source files."
+    )
+});
 
 /// The pre-enrichment description, used only by the `code_map:lines` control arm.
 const DESCRIPTION_BARE_PATHS: &str = "Map the codebase without reading files. Use \
@@ -62,6 +115,9 @@ const DESCRIPTION_BARE_PATHS: &str = "Map the codebase without reading files. Us
      op=callees: files the definer of `symbol` depends on. \
      op=graph: whole-project file→file dependency graph. \
      op=chain: transitive users of `symbol`, grouped by hop distance. \
+     op=affected_tests: advisory test candidates for changed files, with dependency paths. \
+     op=inspect: Rust function spans and syntactic calls in path; no semantic resolution. \
+     op=context: declarations, tests, references and dependency paths under one budget. \
      Matches by name, so a mention in a comment or string can over-report.";
 
 /// Deterministic, no-LLM project structure index (Pass 0/1).
@@ -85,19 +141,23 @@ impl TypedTool for CodeMapTool {
         if crate::ablate::code_map_lines_disabled() {
             return DESCRIPTION_BARE_PATHS;
         }
-        "Map the codebase without reading files. Use before editing an unfamiliar \
-         symbol, to find where it lives and what breaks if you change it. \
-         op=list (default): every source file with the signatures it declares — \
-         scope it with path=\"<dir>\"; a repo too large to list falls back to \
-         symbol counts per file. \
-         op=find_references: every mention of `symbol` (whole-word) as \
-         path:line:code, so you can judge the call sites without opening the files; \
-         searches every text file, not just parsed sources. \
-         op=callers: the file defining `symbol`, plus the files that use it. \
-         op=callees: files the definer of `symbol` depends on. \
-         op=graph: whole-project file→file dependency graph. \
-         op=chain: transitive users of `symbol`, grouped by hop distance. \
-         Matches by name, so a mention in a comment or string can over-report."
+        match mentions::mode() {
+            None => DESCRIPTION,
+            Some(mentions::Mode::Tags) => &DESCRIPTION_TAGS,
+            Some(mentions::Mode::Filter) => &DESCRIPTION_FILTER,
+        }
+    }
+
+    /// `code_only` is offered only in the `SIRBONE_MENTIONS=filter` arm: a
+    /// parameter the other arms would silently ignore is a broken tool.
+    fn input_schema(&self) -> serde_json::Value {
+        let mut schema: serde_json::Value = schemars::schema_for!(CodeMapInput).into();
+        if mentions::mode() != Some(mentions::Mode::Filter) {
+            if let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                props.remove("code_only");
+            }
+        }
+        schema
     }
 
     async fn run(&self, input: CodeMapInput) -> Result<String> {
@@ -109,16 +169,26 @@ impl TypedTool for CodeMapTool {
             let require_symbol = |op: &str| {
                 input
                     .symbol
-                    .clone()
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
                     .ok_or_else(|| anyhow!("op={op} requires `symbol`"))
             };
             match input.op {
                 Op::List => Ok(render_list(&root, &index, input.path.as_deref())),
                 Op::FindReferences => {
                     let symbol = require_symbol("find_references")?;
+                    let code_only =
+                        input.code_only && mentions::mode() == Some(mentions::Mode::Filter);
                     Ok(render_refs(
                         &root,
-                        &structure::find_reference_lines(&root, &symbol, REF_LINES_PER_FILE),
+                        &structure::find_reference_lines(
+                            &root,
+                            &symbol,
+                            REF_LINES_PER_FILE,
+                            code_only,
+                        ),
                         &symbol,
                         crate::ablate::code_map_lines_disabled(),
                         &structure::declarations(&index, &symbol),
@@ -149,6 +219,12 @@ impl TypedTool for CodeMapTool {
                         &structure::usage_chain(&index, &edges, &symbol),
                         &symbol,
                     ))
+                }
+                Op::AffectedTests => navigation::affected(&root, &index, &input),
+                Op::Inspect => navigation::inspect(&root, &index, &input),
+                Op::Context => {
+                    let symbol = require_symbol("context")?;
+                    navigation::context(&root, &index, &input, &symbol)
                 }
             }
         })
@@ -227,7 +303,7 @@ fn render_index(rows: &[(String, &structure::FileStructure)]) -> String {
 /// did not test whether the declaration line survives the cap at all, which is a
 /// different question and one the widened text corpus made real: see
 /// [`structure::find_reference_lines`], which now spends a slot on it.
-const REF_LINES_PER_FILE: usize = 3;
+pub(crate) const REF_LINES_PER_FILE: usize = 3;
 /// Whole-result content-line cap, so a symbol used everywhere cannot flood the
 /// context. [`allocate`] spends it breadth-first; files past it still get an
 /// inventory row, which is outside the cap but one short line each.
@@ -303,7 +379,7 @@ fn allocate(
 }
 
 /// `bare` is the `code_map:lines` control arm: file paths only, as before.
-fn render_refs(
+pub(crate) fn render_refs(
     root: &Path,
     hits: &[structure::RefLines],
     symbol: &str,
@@ -334,7 +410,10 @@ fn render_refs(
         let path = rel(root, &hit.path);
         let total = hit.lines.len() + hit.extra;
         if n == 0 {
-            inventory.push_str(&format!("  {path} ({total} match(es))\n"));
+            let none_in_code =
+                mentions::mode() == Some(mentions::Mode::Tags) && hit.non_code == total;
+            let note = if none_in_code { ", none in code" } else { "" };
+            inventory.push_str(&format!("  {path} ({total} match(es){note})\n"));
             continue;
         }
         for (lineno, text) in hit.lines.iter().take(n) {
@@ -622,6 +701,7 @@ mod tests {
                 op: Op::FindReferences,
                 symbol: Some("beta".into()),
                 path: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -646,6 +726,7 @@ mod tests {
                 op: Op::FindReferences,
                 symbol: Some("target".into()),
                 path: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -675,6 +756,7 @@ mod tests {
             path: root.join("a.rs"),
             lines: vec![(7, "pub fn target() {}".into())],
             extra: 2,
+            ..Default::default()
         }];
 
         let bare = render_refs(root, &hits, "target", true, &[]);
@@ -701,6 +783,7 @@ mod tests {
                 op: Op::FindReferences,
                 symbol: Some("widget".into()),
                 path: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -741,6 +824,7 @@ mod tests {
                     .map(|n| (n, format!("line {n}")))
                     .collect(),
                 extra: total.saturating_sub(REF_LINES_PER_FILE),
+                ..Default::default()
             })
             .collect()
     }
@@ -793,6 +877,7 @@ mod tests {
                 op: Op::FindReferences,
                 symbol: Some("widget".into()),
                 path: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -824,6 +909,7 @@ mod tests {
                 op: Op::FindReferences,
                 symbol: Some("widget".into()),
                 path: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -844,7 +930,7 @@ mod tests {
         src.push_str("pub fn widget() {}\n");
         std::fs::write(root.join("a.rs"), src).unwrap();
 
-        let hits = structure::find_reference_lines(root, "widget", REF_LINES_PER_FILE);
+        let hits = structure::find_reference_lines(root, "widget", REF_LINES_PER_FILE, false);
         let out = render_refs(root, &hits, "widget", false, &[root.join("a.rs")]);
         assert!(out.contains("a.rs:5:pub fn widget() {}"), "{out}");
     }
@@ -866,6 +952,7 @@ mod tests {
                 op: Op::Callers,
                 symbol: Some("Foo".into()),
                 path: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -880,6 +967,7 @@ mod tests {
                 op: Op::Callees,
                 symbol: Some("beta".into()),
                 path: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -891,6 +979,7 @@ mod tests {
                 op: Op::Callers,
                 symbol: None,
                 path: None,
+                ..Default::default()
             })
             .await;
         assert!(err.is_err());
@@ -900,6 +989,7 @@ mod tests {
                 op: Op::Graph,
                 symbol: None,
                 path: None,
+                ..Default::default()
             })
             .await
             .unwrap();

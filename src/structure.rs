@@ -12,7 +12,8 @@
 //!
 //! Regex extraction is heuristic: a keyword inside a string or comment can be
 //! mis-captured. For an agent's project map this is acceptable; a precise
-//! caller→callee graph would need a real parser and is out of scope here.
+//! caller→callee graph needs semantic resolution. The separate opt-in
+//! [`rust_syntax`] view parses function bodies but does not resolve dependencies.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,13 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+// New modules: no `unwrap` outside tests (legacy code is accepted debt).
+#[deny(clippy::unwrap_used)]
+pub mod impact;
+pub mod mentions;
+#[deny(clippy::unwrap_used)]
+pub mod rust_syntax;
 
 /// Directories always pruned, even when no `.gitignore` excludes them.
 const PRUNE_DIRS: &[&str] = &["node_modules", "target", ".venv", "dist", "build", ".git"];
@@ -306,7 +314,7 @@ fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync) -> Vec<R>
 /// — the previous mean-length check let a huge single line padded with blanks
 /// through). Returns `None` to skip. Centralises every analysis read so the caps
 /// apply uniformly.
-fn read_source(path: &Path) -> Option<String> {
+pub(crate) fn read_source(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     if content.as_bytes().contains(&0) {
         return None; // binary
@@ -522,9 +530,8 @@ pub fn discover(root: &Path) -> Vec<(PathBuf, Lang)> {
 }
 
 /// Incremental scan: reuse cached entries whose mtime is unchanged, reparse the
-/// rest, and drop files no longer on disk (auto-GC). NB: a branch switch can
-/// move mtime backward and leave an entry stale; reparse is sub-ms so the only
-/// cost is startup latency, accepted for v1.
+/// rest (including files whose mtime moved backward), and drop files no longer
+/// on disk (auto-GC). Content changes that preserve mtime are not detected.
 pub fn update(root: &Path, mut old: Index) -> Index {
     let mut new = Index::default();
     let mut to_parse: Vec<(PathBuf, Lang, SystemTime)> = Vec::new();
@@ -532,7 +539,7 @@ pub fn update(root: &Path, mut old: Index) -> Index {
         let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
             continue;
         };
-        let fresh = old.files.get(&path).is_some_and(|c| c.mtime >= mtime);
+        let fresh = old.files.get(&path).is_some_and(|c| c.mtime == mtime);
         if fresh {
             if let Some(cached) = old.files.remove(&path) {
                 new.files.insert(path, cached);
@@ -569,13 +576,16 @@ pub fn find_references(root: &Path, symbol: &str) -> Vec<PathBuf> {
 }
 
 /// One referencing file with the matching lines themselves.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RefLines {
     pub path: PathBuf,
     /// 1-based line number and trimmed source line, in file order, capped.
     pub lines: Vec<(usize, String)>,
     /// Matching lines past the cap, counted but not returned.
     pub extra: usize,
+    /// Matching lines whose mentions all sit in comments or strings; counted
+    /// only under `SIRBONE_MENTIONS` (see [`mentions`]), else 0.
+    pub non_code: usize,
 }
 
 /// Like [`find_references`], but returns the matching lines, so the caller can
@@ -588,18 +598,60 @@ pub struct RefLines {
 /// precede it — an import, a doc comment, a re-export — which is exactly the
 /// line the reader needs and the one a caller cannot recover without opening the
 /// file. Lines are returned in file order regardless of how they were chosen.
-pub fn find_reference_lines(root: &Path, symbol: &str, per_file: usize) -> Vec<RefLines> {
+///
+/// `code_only` keeps only mentions in code: no comment, string literal or
+/// non-source file. It needs `SIRBONE_MENTIONS`, which also decides whether a
+/// kept non-code line carries a `[comment]`/`[string]` tag.
+pub fn find_reference_lines(
+    root: &Path,
+    symbol: &str,
+    per_file: usize,
+    code_only: bool,
+) -> Vec<RefLines> {
     let Ok(re) = Regex::new(&format!(r"\b{}\b", regex::escape(symbol))) else {
         return Vec::new();
     };
+    let mode = mentions::mode();
     let mut hits: Vec<RefLines> = par_map(discover_text(root), |path| {
         let content = read_source(&path)?;
-        let mut matched: Vec<(usize, String)> = content
-            .lines()
-            .enumerate()
-            .filter(|(_, l)| re.is_match(l))
-            .map(|(i, l)| (i + 1, l.trim().to_string()))
-            .collect();
+        let lang = lang_for_path(&path);
+        if code_only && lang.is_none() {
+            return None;
+        }
+        let spans = match (mode, lang) {
+            (Some(_), Some(lang)) => mentions::spans(lang, &content),
+            _ => Vec::new(),
+        };
+        let mut matched: Vec<(usize, String)> = Vec::new();
+        let mut non_code = 0;
+        let mut offset = 0;
+        for (i, raw) in content.split_inclusive('\n').enumerate() {
+            let line = raw.trim_end_matches(['\n', '\r']);
+            let start = offset;
+            offset += raw.len();
+            // Code wins: a line with one real use is a use, whatever else it says.
+            let Some(kind) = re
+                .find_iter(line)
+                .map(|m| mentions::kind_at(&spans, start + m.start()))
+                .min()
+            else {
+                continue;
+            };
+            if kind != mentions::Mention::Code {
+                non_code += 1;
+                if code_only {
+                    continue;
+                }
+            }
+            let text = line.trim();
+            matched.push((
+                i + 1,
+                match (mode, kind.tag()) {
+                    (Some(mentions::Mode::Tags), Some(tag)) => format!("{tag} {text}"),
+                    _ => text.to_string(),
+                },
+            ));
+        }
         if matched.is_empty() {
             return None;
         }
@@ -624,6 +676,7 @@ pub fn find_reference_lines(root: &Path, symbol: &str, per_file: usize) -> Vec<R
             path,
             lines: matched,
             extra,
+            non_code,
         })
     })
     .into_iter()
@@ -1012,7 +1065,7 @@ fn rebuild_graph(
     for (abs, cache) in &index.files {
         let rel = abs.strip_prefix(root).unwrap_or(abs).to_path_buf();
         match old_files.get(&rel) {
-            Some(fr) if fr.mtime >= cache.mtime => {
+            Some(fr) if fr.mtime == cache.mtime => {
                 files.insert(
                     rel,
                     FileRefs {
@@ -1211,6 +1264,38 @@ mod tests {
         );
     }
 
+    fn write_source_at(path: &Path, source: &str, seconds: u64) {
+        let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        std::fs::write(path, source).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(mtime))
+            .unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[test]
+    fn update_reparses_when_mtime_moves_backward() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("a.rs");
+        write_source_at(&path, "fn original() {}", 1_700_000_060);
+        let index = update(root, Index::default());
+        // A persisted cache must also refresh after restoring an older file.
+        let bytes = bincode::serialize(&index).unwrap();
+        let index = bincode::deserialize(&bytes).unwrap();
+
+        write_source_at(&path, "fn replacement() {}", 1_700_000_000);
+        let index = update(root, index);
+        assert_eq!(index.files[&path].data.defs, ["replacement"]);
+        assert_eq!(
+            index.files[&path].mtime,
+            std::fs::metadata(&path).unwrap().modified().unwrap()
+        );
+    }
+
     #[test]
     fn find_references_whole_word_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -1249,7 +1334,7 @@ mod tests {
         }
         assert!(!refs.contains(&"lib.rs".to_string()), "{refs:?}");
 
-        let lines = find_reference_lines(root, "Widget", 3);
+        let lines = find_reference_lines(root, "Widget", 3, false);
         assert_eq!(
             names(&lines.iter().map(|r| r.path.clone()).collect::<Vec<_>>()).len(),
             3
@@ -1367,6 +1452,32 @@ mod tests {
             [(b.clone(), root.join("a.rs"))],
             "stale edge survived deletion"
         );
+    }
+
+    #[test]
+    fn graph_refreshes_when_mtime_moves_backward() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let a = root.join("a.rs");
+        let b = root.join("b.rs");
+        let caller = root.join("caller.rs");
+        std::fs::write(&a, "pub fn alpha() {}").unwrap();
+        std::fs::write(&b, "pub fn beta() {}").unwrap();
+        write_source_at(&caller, "pub fn caller() { alpha(); }", 1_700_000_060);
+        let index = update(root, Index::default());
+        let (cache, edges) = rebuild_graph(root, &index, GraphCache::default());
+        assert_eq!(edges, [(caller.clone(), a)]);
+        let fingerprint = cache.names_fp;
+        let bytes = bincode::serialize(&cache).unwrap();
+        let cache = bincode::deserialize(&bytes).unwrap();
+
+        // Keep all definitions identical so full name-table invalidation cannot
+        // hide a stale per-file edge cache.
+        write_source_at(&caller, "pub fn caller() { beta(); }", 1_700_000_000);
+        let index = update(root, index);
+        let (cache, edges) = rebuild_graph(root, &index, cache);
+        assert_eq!(cache.names_fp, fingerprint);
+        assert_eq!(edges, [(caller, b)]);
     }
 
     #[test]
