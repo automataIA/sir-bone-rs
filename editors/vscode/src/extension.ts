@@ -33,7 +33,8 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.commands.executeCommand("workbench.action.openSettings", "@ext:sirbone.sirbone-vscode")
     ),
     // Credential onboarding.
-    vscode.commands.registerCommand("sirbone.signIn", () => signIn().then(() => provider.refreshMeta()))
+    vscode.commands.registerCommand("sirbone.signIn", () => signIn().then(() => provider.refreshMeta())),
+    vscode.commands.registerCommand("sirbone.setThinkingLevel", () => setThinkingLevel().then(() => provider.refreshMeta()))
   );
   // Settings (model included) apply to the very next turn with no restart —
   // sessions re-read the config per spawn. This listener keeps the status bar
@@ -102,33 +103,52 @@ function resolveBinary(cwd: string): string {
   return expanded;
 }
 
-// Onboarding: collect credentials in VS Code (key entered masked, never echoed),
-// then hand them to `sirbone login` non-interactively — the key goes via stdin,
-// so the core owns the secure 0600 write of ~/.sirbone/.env (one code path).
+// Onboarding wizard: token first (masked), then provider from a curated list,
+// then the base URL (prefilled with the provider's endpoint), then the model —
+// NOT a free-text input but a dropdown built from a live `sirbone login
+// --login-list-models` call (token via stdin, nothing written yet). The final
+// `sirbone login` hand-off keeps the core owning the secure 0600 write of
+// ~/.sirbone/.env (one code path).
+const PROVIDER_PRESETS: {
+  label: string;
+  description: string;
+  value: "anthropic" | "openai";
+  base: string;
+}[] = [
+  { label: "Anthropic (Claude)", description: "caching + extended thinking", value: "anthropic", base: "" },
+  { label: "z.ai / GLM", description: "Anthropic-compatible — caching + thinking", value: "anthropic", base: "https://api.z.ai/api/anthropic" },
+  { label: "OpenAI", description: "GPT models", value: "openai", base: "" },
+  { label: "OpenRouter", description: "one key, most models", value: "openai", base: "https://openrouter.ai/api/v1" },
+  { label: "Groq", description: "fast, free tier", value: "openai", base: "https://api.groq.com/openai/v1" },
+  { label: "Google AI Studio (Gemini)", description: "free tier, no card", value: "openai", base: "https://generativelanguage.googleapis.com/v1beta/openai/" },
+  { label: "Ollama (local)", description: "locally hosted models", value: "openai", base: "http://localhost:11434/v1" },
+];
+
+// Run the sirbone binary with the token piped via stdin (never argv). Resolves
+// with exit code and combined output; rejects on spawn error.
+function runSirboneWithToken(
+  bin: string,
+  cwd: string,
+  args: string[],
+  token: string
+): Promise<{ code: number | null; out: string }> {
+  return new Promise((resolve, reject) => {
+    const child = cp.spawn(bin, args, { cwd, env: process.env });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d.toString()));
+    child.stderr.on("data", (d) => (out += d.toString()));
+    child.on("error", (e) => reject(new Error(e.message)));
+    child.on("close", (code) => resolve({ code, out }));
+    child.stdin.write(token);
+    child.stdin.end();
+  });
+}
+
 async function signIn() {
   const cwd = vscode.workspace.workspaceFolders?.[0].uri.fsPath ?? process.cwd();
   const bin = resolveBinary(cwd);
-  const provider = await vscode.window.showQuickPick(
-    [
-      { label: "Anthropic / z.ai / GLM", description: "Claude-compatible (caching + thinking)", value: "anthropic" },
-      { label: "OpenAI / Ollama / Groq / OpenRouter", description: "OpenAI-compatible", value: "openai" },
-    ],
-    { placeHolder: "Select your provider", ignoreFocusOut: true }
-  );
-  if (!provider) return;
-  const anthropic = provider.value === "anthropic";
-  const baseUrl = await vscode.window.showInputBox({
-    prompt: "Base URL (leave blank for the provider's official endpoint)",
-    value: anthropic ? "https://api.z.ai/api/anthropic" : "",
-    ignoreFocusOut: true,
-  });
-  if (baseUrl === undefined) return;
-  const model = await vscode.window.showInputBox({
-    prompt: "Model id",
-    value: anthropic ? "glm-5.3" : "gpt-4o-mini",
-    ignoreFocusOut: true,
-  });
-  if (model === undefined) return;
+
+  // 1. Token — paste once, masked; reused for the model listing and the write.
   const key = await vscode.window.showInputBox({
     prompt: "API key / token (stored in ~/.sirbone/.env, chmod 600)",
     password: true,
@@ -136,30 +156,101 @@ async function signIn() {
   });
   if (!key) return;
 
-  const args = ["login", "--login-provider", provider.value];
+  // 2. Provider — curated list of the popular inference providers.
+  const provider = await vscode.window.showQuickPick(
+    PROVIDER_PRESETS.map((p) => ({ label: p.label, description: p.description, value: p })),
+    { placeHolder: "Select your provider", ignoreFocusOut: true }
+  );
+  if (!provider) return;
+  const { value: providerValue, base: presetBase } = provider.value;
+
+  // 3. Base URL — prefilled with the preset endpoint; blank = official default.
+  const baseUrl = await vscode.window.showInputBox({
+    prompt: "Base URL (blank = provider's official endpoint)",
+    value: presetBase,
+    ignoreFocusOut: true,
+  });
+  if (baseUrl === undefined) return;
+
+  // 4. Model — dropdown from the live model list (token on stdin, no write).
+  let model: string | undefined;
+  try {
+    const listArgs = ["login", "--login-provider", providerValue, "--login-list-models"];
+    if (baseUrl.trim()) listArgs.push("--login-base-url", baseUrl.trim());
+    const { code, out } = await runSirboneWithToken(bin, cwd, listArgs, key);
+    const models = code === 0
+      ? out.split("\n").map((l) => l.trim()).filter(Boolean)
+      : [];
+    if (models.length > 0) {
+      const picked = await vscode.window.showQuickPick(
+        models.map((m) => ({ label: m })),
+        { placeHolder: `Select a model (${models.length} available)`, ignoreFocusOut: true }
+      );
+      model = picked?.label;
+    } else if (code !== 0) {
+      // Endpoint unreachable or no /models — fall back to free text, but say why.
+      const retry = await vscode.window.showWarningMessage(
+        `Sir Bone: could not list models (${out.trim().split("\n").pop() || "no output"}).`,
+        "Enter model manually"
+      );
+      if (retry !== "Enter model manually") return;
+    }
+  } catch (e) {
+    vscode.window.showErrorMessage(`Sir Bone: model listing failed: ${(e as Error).message}`);
+    return;
+  }
+  if (!model) {
+    model = await vscode.window.showInputBox({
+      prompt: "Model id",
+      value: providerValue === "anthropic" ? "claude-opus-4-7" : "gpt-4o-mini",
+      ignoreFocusOut: true,
+    });
+    if (model === undefined) return;
+  }
+
+  const args = ["login", "--login-provider", providerValue];
   if (baseUrl.trim()) args.push("--login-base-url", baseUrl.trim());
   if (model.trim()) args.push("--login-model", model.trim());
-  await new Promise<void>((resolve) => {
-    const child = cp.spawn(bin, args, { cwd, env: process.env });
-    let out = "";
-    child.stdout.on("data", (d) => (out += d.toString()));
-    child.stderr.on("data", (d) => (out += d.toString()));
-    child.on("error", (e) => { vscode.window.showErrorMessage(`Sir Bone sign-in failed: ${e.message}`); resolve(); });
-    child.on("close", (code) => {
-      if (code === 0) vscode.window.showInformationMessage("Sir Bone: credentials saved to ~/.sirbone/.env — you can chat now.");
-      else vscode.window.showErrorMessage(`Sir Bone sign-in failed: ${out.trim() || "exit " + code}`);
-      resolve();
-    });
-    child.stdin.write(key);
-    child.stdin.end();
-  });
+  try {
+    const { code, out } = await runSirboneWithToken(bin, cwd, args, key);
+    if (code === 0) vscode.window.showInformationMessage("Sir Bone: credentials saved to ~/.sirbone/.env — you can chat now.");
+    else vscode.window.showErrorMessage(`Sir Bone sign-in failed: ${out.trim() || "exit " + code}`);
+  } catch (e) {
+    vscode.window.showErrorMessage(`Sir Bone sign-in failed: ${(e as Error).message}`);
+  }
+}
+
+// Thinking-level quick switch: one QuickPick, maps the user-facing level to the
+// budget the clients already understand (GLM → effort label, Claude → tokens).
+// Applies to the very next turn (buildEnv re-reads the setting per spawn).
+const THINKING_LEVELS: { label: string; description: string; budget: number }[] = [
+  { label: "Off", description: "no extended thinking (GLM sends minimal)", budget: 0 },
+  { label: "Low", description: "light reasoning (8000 tokens)", budget: 8000 },
+  { label: "Medium", description: "balanced reasoning (16000 tokens)", budget: 16000 },
+  { label: "Max", description: "deepest reasoning (32000 tokens)", budget: 32000 },
+];
+
+async function setThinkingLevel() {
+  const cfg = vscode.workspace.getConfiguration("sirbone");
+  const current = cfg.get<number>("thinkingBudget", 0);
+  const active = THINKING_LEVELS.find((l) => l.budget === current)?.label ?? `current: ${current}`;
+  const picked = await vscode.window.showQuickPick(
+    THINKING_LEVELS.map((l) => ({ label: l.label, description: l.description, value: l })),
+    { placeHolder: `Thinking level (current: ${active})`, ignoreFocusOut: true }
+  );
+  if (!picked) return;
+  const target = vscode.workspace.workspaceFolders
+    ? vscode.ConfigurationTarget.Workspace
+    : vscode.ConfigurationTarget.Global;
+  await cfg.update("thinkingBudget", picked.value.budget, target);
+  vscode.window.showInformationMessage(`Sir Bone: thinking set to ${picked.label} (next turn).`);
 }
 
 // Provider + model from `sirbone doctor` (no API call, ~1s). `env` must be the
 // same effective environment the chat sessions get (buildEnv): the VS Code
 // process itself may carry a stale exported SIRBONE_MODEL that dotenvy would
 // never override, which made the status bar lie after a settings change.
-function readDoctor(bin: string, cwd: string, env: NodeJS.ProcessEnv, cb: (m: { provider?: string; model?: string }) => void) {
+function readDoctor(bin: string, cwd: string, env: NodeJS.ProcessEnv, cb: (m: { provider?: string; model?: string; thinking?: string }) => void) {
   let out = "";
   const child = cp.spawn(bin, ["doctor"], { cwd, env });
   child.stdout.on("data", (d) => (out += d.toString()));
@@ -167,7 +258,8 @@ function readDoctor(bin: string, cwd: string, env: NodeJS.ProcessEnv, cb: (m: { 
   child.on("close", () => {
     const provider = out.match(/provider:\s*(\S+)/)?.[1];
     const model = out.match(/\bmodel:\s*(\S+)/)?.[1];
-    cb({ provider, model });
+    const thinking = out.match(/thinking:\s*(.+)/)?.[1]?.trim();
+    cb({ provider, model, thinking });
   });
 }
 
@@ -326,6 +418,7 @@ function buildEnv(cfg: vscode.WorkspaceConfiguration, ctxWindow: number): NodeJS
   else delete env.SIRBONE_MODEL;
   const tb = cfg.get<number>("thinkingBudget", 0);
   if (tb > 0) env.SIRBONE_THINKING_BUDGET = String(tb);
+  else delete env.SIRBONE_THINKING_BUDGET;
   const ms = cfg.get<number>("maxSteps", 0);
   if (ms > 0) env.SIRBONE_MAX_STEPS = String(ms);
   if (cfg.get<boolean>("planMode", false)) env.SIRBONE_PLAN = "1";
@@ -395,6 +488,10 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
       if (msg?.type === "settings")
         return void vscode.commands.executeCommand("workbench.action.openSettings", "@ext:sirbone.sirbone-vscode");
       if (msg?.type === "signIn") { signIn().then(refreshMeta); return; }
+      if (msg?.type === "setThinking") {
+        vscode.commands.executeCommand("sirbone.setThinkingLevel").then(refreshMeta);
+        return;
+      }
       if (msg?.type === "history")
         return void view.webview.postMessage({ type: "sessions", list: listSessions(cwd) });
       if (msg?.type === "files")
@@ -749,6 +846,8 @@ function getHtml(webview: vscode.Webview, a: Assets, cspNonce: string): string {
   #statusbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
                font-size: 11px; color: var(--muted); padding: 0 4px 8px; }
   .sb { display: inline-flex; align-items: center; gap: 4px; }
+  .sb[title*="thinking"] { cursor: pointer; }
+  .sb[title*="thinking"]:hover { color: var(--accent); }
   .ctxbar { width: 40px; height: 4px; border-radius: 2px; background: var(--code-bg); overflow: hidden; }
   #ctxfill { display: block; height: 100%; width: 0%; background: var(--ok); transition: width .3s, background .3s; }
   #statusbar #stat { margin-left: auto; }
@@ -845,7 +944,7 @@ function getHtml(webview: vscode.Webview, a: Assets, cspNonce: string): string {
   <div id="bar">
     <div id="statusbar">
       <span class="sb" title="Provider"><svg class="ic"><use href="#i-server"/></svg><span id="provider">—</span></span>
-      <span class="sb" title="Model"><svg class="ic"><use href="#i-cpu"/></svg><span id="model">—</span></span>
+      <span class="sb" title="Model — click to change thinking level"><svg class="ic"><use href="#i-cpu"/></svg><span id="model">—</span></span>
       <span class="sb" title="Context usage (peak vs window)"><svg class="ic"><use href="#i-gauge"/></svg><span class="ctxbar"><span id="ctxfill"></span></span><span id="ctxpct">—</span></span>
       <span class="sb" title="5-hour quota window"><svg class="ic"><use href="#i-clock"/></svg><span id="quota">—</span></span>
       <span id="stat"></span>
@@ -1199,6 +1298,8 @@ function getHtml(webview: vscode.Webview, a: Assets, cspNonce: string): string {
   $('set-close').addEventListener('click', () => { settingsPanel.hidden = true; });
   $('open-vs-settings').addEventListener('click', () => vscode.postMessage({ type: 'settings' }));
   $('btn-signin').addEventListener('click', () => vscode.postMessage({ type: 'signIn' }));
+  // Model chip doubles as the thinking dial: click → level picker (host command).
+  $('model').addEventListener('click', () => vscode.postMessage({ type: 'setThinking' }));
   const renderConfig = (skillsList, mcp) => {
     const build = (host, items, kind, emptyMsg) => {
       host.innerHTML = '';
@@ -1276,7 +1377,11 @@ function getHtml(webview: vscode.Webview, a: Assets, cspNonce: string): string {
     else if (m.type === 'error') { finalizeStream(); add('err', m.text); busy.checked = false; stat.textContent = ''; }
     else if (m.type === 'attached') addPill(m.label);
     else if (m.type === 'status') { setQuota(m.quota); }
-    else if (m.type === 'meta') { if (m.provider) providerEl.textContent = m.provider; if (m.model) modelEl.textContent = m.model; updateAccount(); }
+    else if (m.type === 'meta') {
+      if (m.provider) providerEl.textContent = m.provider;
+      if (m.model) modelEl.textContent = m.model + ' (' + (m.thinking || 'off') + ')';
+      updateAccount();
+    }
     else if (m.type === 'files') { files = m.list || []; refreshSg(); }
     else if (m.type === 'skills') { skills = m.list || []; if (!suggest.hidden && sgMode === 'slash') refreshSg(); }
     else if (m.type === 'config') { skills = m.skills || skills; renderConfig(m.skills || [], m.mcp || []); }

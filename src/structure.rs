@@ -39,9 +39,9 @@ const PRUNE_DIRS: &[&str] = &["node_modules", "target", ".venv", "dist", "build"
 /// guard against megabyte-scale generated/serialized blobs that aren't ignored.
 const MAX_FILE_BYTES: u64 = 1_000_000;
 
-/// A file whose mean line length exceeds this is treated as minified and
-/// skipped (scc's heuristic: mean line ≥ 255 bytes). Catches minified bundles
-/// that slip under [`MAX_FILE_BYTES`].
+/// Lines longer than this count as minified; a file whose bytes sit mostly on
+/// such lines is skipped (after scc's mean-line ≥ 255 heuristic). Catches
+/// minified bundles that slip under [`MAX_FILE_BYTES`].
 const MAX_MEAN_LINE: usize = 255;
 
 /// Languages recognised by file extension.
@@ -310,17 +310,22 @@ fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync) -> Vec<R>
 }
 
 /// Read a file for analysis, skipping non-UTF-8/binary (a NUL byte, ripgrep's
-/// heuristic) and minified blobs (any single line longer than [`MAX_MEAN_LINE`]
-/// — the previous mean-length check let a huge single line padded with blanks
-/// through). Returns `None` to skip. Centralises every analysis read so the caps
-/// apply uniformly.
+/// heuristic) and minified blobs: most of the bytes sit on lines longer than
+/// [`MAX_MEAN_LINE`]. A plain mean let a huge single line padded with blanks
+/// through; "any long line" dropped whole source files over one long string
+/// literal (`src/main.rs` vanished from the index). Returns `None` to skip.
+/// Centralises every analysis read so the caps apply uniformly.
 pub(crate) fn read_source(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     if content.as_bytes().contains(&0) {
         return None; // binary
     }
-    let too_long = content.lines().any(|l| l.len() > MAX_MEAN_LINE);
-    (!too_long).then_some(content)
+    let long: usize = content
+        .lines()
+        .map(str::len)
+        .filter(|&n| n > MAX_MEAN_LINE)
+        .sum();
+    (long * 2 <= content.len()).then_some(content)
 }
 
 /// Whether a regex match at byte offset `start` should be dropped as a
@@ -1684,5 +1689,24 @@ mod tests {
             !kept.contains(&"blob.py".to_string()),
             "binary not skipped: {kept:?}"
         );
+    }
+
+    /// One long string literal in an ordinary source file must not drop the
+    /// whole file: `src/main.rs` (one 1258-byte line, mean 42) vanished from the
+    /// index and from grep's routed view. A long line padded out with blank
+    /// lines is still a blob.
+    #[test]
+    fn one_long_line_keeps_source_but_padded_blob_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let body: String = (0..50).map(|i| format!("pub fn f{i}() {{}}\n")).collect();
+        let long = format!("const S: &str = \"{}\";\n", "x".repeat(1200));
+        std::fs::write(root.join("main.rs"), format!("{body}{long}{body}")).unwrap();
+        let padded = format!("var x={};{}", "a".repeat(5000), "\n".repeat(200));
+        std::fs::write(root.join("padded.js"), padded).unwrap();
+        assert!(read_source(&root.join("main.rs")).is_some());
+        assert!(read_source(&root.join("padded.js")).is_none());
+        let index = update(root, Index::default());
+        assert!(!declarations(&index, "f7").is_empty());
     }
 }

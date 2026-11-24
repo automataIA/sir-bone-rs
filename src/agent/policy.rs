@@ -231,7 +231,7 @@ pub(crate) async fn decide(
         }
         crate::checks::PreVerdict::Pass => {}
     }
-    if tool == "bash" && permissions::is_destructive(&inner) {
+    if tool == "bash" && permissions::is_destructive(&inner) && !own_scratch_rm(ctx, &inner).await {
         return (Decision::Ask, PreAction::AsIs);
     }
     let needs_classify = tool == "bash"
@@ -241,6 +241,29 @@ pub(crate) async fn decide(
         return classify(ctx, &inner).await;
     }
     (Decision::Allow, PreAction::AsIs)
+}
+
+/// A headless `rm` whose every target is a file this run created, or one that
+/// does not exist yet (so only this command can create it) — the
+/// model's own scratch test, deleted after running it. With no one to answer,
+/// the destructive-command confirmation turned that into a hard denial, and
+/// the test run chained after the `rm` was lost with it. Pre-existing,
+/// ignored or out-of-tree files, recursion and globs keep the confirmation.
+/// Interactive sessions are untouched: there the question costs one keypress.
+async fn own_scratch_rm(ctx: &AgentContext, cmd: &str) -> bool {
+    let (None, Some(snaps)) = (&ctx.confirm, &ctx.snapshots) else {
+        return false;
+    };
+    let (Some(targets), Ok(cwd)) = (permissions::plain_rm_targets(cmd), std::env::current_dir()) else {
+        return false;
+    };
+    for t in targets.iter().map(|t| cwd.join(t)) {
+        if !snaps.not_yet_created(&t) && !snaps.created_this_run(&t).await {
+            return false;
+        }
+    }
+    telemetry::add(&telemetry::SCRATCH_RM_ALLOWED, 1);
+    true
 }
 
 /// Ask the LLM to classify a command against the configured environment.

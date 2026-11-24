@@ -151,6 +151,11 @@ struct Cli {
     #[arg(long)]
     login_model: Option<String>,
 
+    /// With --login-provider: probe the endpoint and print available model ids
+    /// (token on stdin); nothing is written. Used by front-end wizards.
+    #[arg(long, requires = "login_provider")]
+    login_list_models: bool,
+
     /// Check provider env, config, project instructions, snapshots, MCP, hooks, and tools; no model call.
     #[arg(long)]
     doctor: bool,
@@ -752,6 +757,9 @@ async fn main() -> Result<()> {
     }
     if cli.login || cli.prompt.first().map(|s| s.as_str()) == Some("login") {
         if let Some(provider) = cli.login_provider.as_deref() {
+            if cli.login_list_models {
+                return cmd::list_models_for(provider, cli.login_base_url.as_deref()).await;
+            }
             if provider == "codex" {
                 return cmd::login_codex().await;
             }
@@ -2378,7 +2386,7 @@ async fn render_events(
         // the process, which equals per-run in the bench's one-task-per-process mode.
         use sirbone::telemetry as tm;
         eprintln!(
-            "[usage] calls={usage_calls} input_tokens={usage_input} output_tokens={usage_output} cached_tokens={usage_cached} peak_context={usage_peak} tool_calls={usage_tool_calls} tool_errors={usage_tool_errors} edit_fails={usage_edit_fails} mcp_tools={mcp_tools} mcp_schema_tokens={mcp_schema_tokens} native_tools={native_tools} native_schema_tokens={native_schema_tokens} compaction_fired={} historia_writes={} historia_hits={} system_prompt_tokens={} hook_pre_runs={} hook_pre_denies={} hook_post_runs={} hook_post_failures={} hook_stop_runs={} hook_stop_retries={} hook_stop_exhausted={} oracle_runs={} oracle_failures={} oracle_retries={} oracle_rollbacks={} oracle_exhausted={} ask_user_rounds={} ask_user_questions={} verify_tool_runs={} spill_writes={} read_outlines={} patch_applies={} patch_rejects={} stream_rule_trips={} plan_contract_initialized={} plan_contract_updated={} plan_mutations_blocked={} tool_batches={} tool_calls_emitted={} completion_checks_fired={} test_file_mutations={} best_of_attempts={} best_of_selections={} permission_denies_policy={} permission_denies_user={} permission_denies_unattended={} permission_bypassed={} tool_calls_dispatched={} tusk_runs={} tusk_edits={} tusk_withheld={}",
+            "[usage] calls={usage_calls} input_tokens={usage_input} output_tokens={usage_output} cached_tokens={usage_cached} peak_context={usage_peak} tool_calls={usage_tool_calls} tool_errors={usage_tool_errors} edit_fails={usage_edit_fails} mcp_tools={mcp_tools} mcp_schema_tokens={mcp_schema_tokens} native_tools={native_tools} native_schema_tokens={native_schema_tokens} compaction_fired={} historia_writes={} historia_hits={} system_prompt_tokens={} hook_pre_runs={} hook_pre_denies={} hook_post_runs={} hook_post_failures={} hook_stop_runs={} hook_stop_retries={} hook_stop_exhausted={} oracle_runs={} oracle_failures={} oracle_retries={} oracle_rollbacks={} oracle_exhausted={} ask_user_rounds={} ask_user_questions={} verify_tool_runs={} spill_writes={} read_outlines={} patch_applies={} patch_rejects={} stream_rule_trips={} plan_contract_initialized={} plan_contract_updated={} plan_mutations_blocked={} tool_batches={} tool_calls_emitted={} completion_checks_fired={} test_file_mutations={} best_of_attempts={} best_of_selections={} permission_denies_policy={} permission_denies_user={} permission_denies_unattended={} permission_bypassed={} tool_calls_dispatched={} tusk_runs={} tusk_edits={} tusk_withheld={} masked_results={} route_bodies={} scratch_rm_allowed={}",
             tm::get(&tm::COMPACTION_FIRED),
             tm::get(&tm::HISTORIA_WRITES),
             tm::get(&tm::HISTORIA_HITS),
@@ -2396,6 +2404,7 @@ async fn render_events(
             tm::get(&tm::PERMISSION_DENIES_POLICY), tm::get(&tm::PERMISSION_DENIES_USER), tm::get(&tm::PERMISSION_DENIES_UNATTENDED),
             tm::get(&tm::PERMISSION_BYPASSED), tm::get(&tm::TOOL_CALLS_DISPATCHED),
             tm::get(&tm::TUSK_RUNS), tm::get(&tm::TUSK_EDITS), tm::get(&tm::TUSK_WITHHELD),
+            tm::get(&tm::MASKED_RESULTS), tm::get(&tm::ROUTE_BODIES), tm::get(&tm::SCRATCH_RM_ALLOWED),
         );
     }
     Ok((

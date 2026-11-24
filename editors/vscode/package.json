@@ -2,7 +2,7 @@
   "name": "sirbone-vscode",
   "displayName": "Sir Bone",
   "description": "Chat panel that drives the sirbone CLI agent inside VS Code.",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "publisher": "sirbone",
   "engines": { "vscode": "^1.97.0" },
   "categories": ["Other"],
@@ -26,7 +26,8 @@
       { "command": "sirbone.openChat", "title": "Sirbone: Open Chat" },
       { "command": "sirbone.newChat", "title": "New Chat", "icon": "$(add)" },
       { "command": "sirbone.openSettings", "title": "Sir Bone: Settings", "icon": "$(gear)" },
-      { "command": "sirbone.signIn", "title": "Sir Bone: Sign in / set API key" }
+      { "command": "sirbone.signIn", "title": "Sir Bone: Sign in / set API key" },
+      { "command": "sirbone.setThinkingLevel", "title": "Sir Bone: Set thinking level" }
     ],
     "configuration": {
       "title": "Sir Bone",
@@ -60,7 +61,7 @@
         "sirbone.thinkingBudget": {
           "type": "number",
           "default": 0,
-          "markdownDescription": "Extended-thinking budget in tokens: lets the model reason before answering. `0` disables it. Higher = deeper reasoning but slower and more expensive. Passed as `SIRBONE_THINKING_BUDGET`."
+          "markdownDescription": "Extended-thinking budget in tokens: lets the model reason before answering. `0` disables it. Levels: 8000 = low, 16000 = medium, 32000 = max (on GLM these map to reasoning-effort levels). Or use the command \"Sir Bone: Set thinking level\" / click the model chip. Passed as `SIRBONE_THINKING_BUDGET`."
         },
         "sirbone.maxSteps": {
           "type": "number",

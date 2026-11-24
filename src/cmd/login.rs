@@ -223,6 +223,52 @@ pub async fn run_login() -> Result<()> {
     .await
 }
 
+/// List the models a provider+token can serve, WITHOUT writing credentials:
+/// token via stdin, one model id per line on stdout. The front-end wizard
+/// (VS Code) calls this between the token paste and the model dropdown, so the
+/// model choice is always a live list instead of a guessed string.
+pub async fn list_models_for(provider: &str, base: Option<&str>) -> Result<()> {
+    let mut token = String::new();
+    io::stdin()
+        .read_to_string(&mut token)
+        .context("read token from stdin")?;
+    let token = token.trim();
+    if token.is_empty() {
+        anyhow::bail!("empty token on stdin");
+    }
+    let anthropic = match provider {
+        "anthropic" => true,
+        "openai" => false,
+        other => anyhow::bail!("unknown provider '{other}' (use anthropic|openai)"),
+    };
+    let base = base
+        .filter(|b| !b.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if anthropic {
+                "https://api.anthropic.com".into()
+            } else {
+                "https://api.openai.com/v1".into()
+            }
+        });
+    let client: Arc<dyn LlmClient> = if anthropic {
+        Arc::new(AnthropicClient::new(&base, token, "probe"))
+    } else {
+        Arc::new(OpenAiClient::new(&base, token, "probe"))
+    };
+    let models = match tokio::time::timeout(std::time::Duration::from_secs(20), client.list_models())
+        .await
+    {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => anyhow::bail!("{}", redact_secrets(&e.to_string())),
+        Err(_) => anyhow::bail!("timeout: endpoint unreachable"),
+    };
+    for m in models {
+        println!("{m}");
+    }
+    Ok(())
+}
+
 /// Non-interactive credential set for front-ends (the VS Code extension, scripts).
 /// The token is read from **stdin** — never argv, so it can't leak via `ps` or
 /// shell history. Reuses [`finish`] (write `~/.sirbone/.env` at 0600 + probe), so

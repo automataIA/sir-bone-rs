@@ -86,18 +86,105 @@ impl TypedTool for GrepTool {
             };
         }
 
-        if let Some(view) = structural_view(&input, &stdout).await {
-            return Ok(truncate_default(view));
-        }
-
-        let limited: String = stdout
-            .lines()
-            .take(input.max_results as usize)
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(truncate_default(limited))
+        let out = match structural_view(&input, &stdout).await {
+            Some(view) => view,
+            None => stdout
+                .lines()
+                .take(input.max_results as usize)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        };
+        Ok(truncate_default(match body_view(&input).await {
+            Some(body) => format!("{out}\n\n{body}"),
+            None => out,
+        }))
     }
+}
+
+/// Lines of a definition body appended to a grep answer, at most.
+const BODY_MAX_LINES: usize = 60;
+
+/// Opt-in (`SIRBONE_ROUTE_BODY=1`, under A/B): when a bare identifier search
+/// names a symbol declared in exactly one file, append that declaration's
+/// body. The commonest navigation idiom in the session corpus is grep for a
+/// name, then `sed -n` its line range (20.7 pairs per 100 navigation calls,
+/// `bench/harness_levers_probe/results.md`); this answers both in one call.
+async fn body_view(input: &GrepInput) -> Option<String> {
+    if std::env::var_os("SIRBONE_ROUTE_BODY").is_none()
+        || input.raw
+        || input.case_insensitive
+        || crate::ablate::grep_route_disabled()
+    {
+        return None;
+    }
+    let symbol = bare_symbol(&input.pattern)?.to_owned();
+    let root = std::env::current_dir().ok()?.canonicalize().ok()?;
+    let body = tokio::task::spawn_blocking(move || definition_body(&root, &symbol))
+        .await
+        .ok()
+        .flatten()?;
+    crate::telemetry::add(&crate::telemetry::ROUTE_BODIES, 1);
+    Some(body)
+}
+
+/// The body of the single declaration of `symbol`, or `None` when it is
+/// declared in zero or several files, or the body is a single line (the grep
+/// line already shows it).
+fn definition_body(root: &Path, symbol: &str) -> Option<String> {
+    let index = structure::update(root, Index::load(root));
+    let _ = index.save(root);
+    let [file] = structure::declarations(&index, symbol).try_into().ok()?;
+    let path = root.join(&file);
+    let content = std::fs::read_to_string(&path).ok()?;
+    let lang = structure::lang_for_path(&path)?;
+    let word = Regex::new(&format!(r"\b{}\b", regex::escape(symbol))).ok()?;
+    let decl = structure::outline(lang, &content)
+        .into_iter()
+        .find(|d| word.is_match(&d.sig))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let (start, end) = body_range(&lines, decl.line - 1);
+    if end - start < 2 {
+        return None;
+    }
+    let shown = end.min(start + BODY_MAX_LINES);
+    let rel = path.strip_prefix(root).unwrap_or(&path).display();
+    let mut out = format!(
+        "[definition of `{symbol}` — {rel}:{}-{end}]\n",
+        start + 1
+    );
+    for (i, l) in lines[start..shown].iter().enumerate() {
+        out.push_str(&format!("{}: {l}\n", start + i + 1));
+    }
+    if shown < end {
+        out.push_str(&format!(
+            "… {} more lines: read {rel} from line {}\n",
+            end - shown,
+            shown + 1
+        ));
+    }
+    Some(out)
+}
+
+/// Half-open line range of the declaration starting at `start` (0-based).
+/// It ends at the first non-blank line indented no deeper than the
+/// declaration: a closing `}`/`)`/`]` there is included (brace languages),
+/// anything else is not (the next item; Python's dedent).
+fn body_range(lines: &[&str], start: usize) -> (usize, usize) {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let base = indent(lines[start]);
+    let mut end = lines.len();
+    for (i, l) in lines.iter().enumerate().skip(start + 1) {
+        let t = l.trim_start();
+        if t.is_empty() || indent(l) > base {
+            continue;
+        }
+        end = if t.starts_with(['}', ')', ']']) { i + 1 } else { i };
+        break;
+    }
+    while end > start + 1 && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    (start, end)
 }
 
 /// Matching lines past which a bare identifier search is answered with the
@@ -263,13 +350,49 @@ fn route(root: &Path, symbol: &str, stdout: &str, note: &str) -> Option<String> 
         .into_iter()
         .filter(|h| scope.contains(&h.path))
         .collect();
-    (!hits.is_empty()).then(|| {
-        let definers = structure::declarations(&index, symbol);
-        format!(
-            "{note}\n{}",
-            render_refs(root, &hits, symbol, false, &definers)
-        )
-    })
+    if hits.is_empty() {
+        return None;
+    }
+    let definers = structure::declarations(&index, symbol);
+    let view = render_refs(root, &hits, symbol, false, &definers);
+    Some(format!(
+        "{note}\n{view}{}",
+        skipped_note(root, symbol, &scope, &hits)
+    ))
+}
+
+/// Files rg matched whole-word that the reference scan does not read (pruned
+/// build dirs, minified or oversized files), named so the view's "every file
+/// listed" stays true instead of a gap that reads as "not used there".
+fn skipped_note(
+    root: &Path,
+    symbol: &str,
+    scope: &HashSet<PathBuf>,
+    hits: &[structure::RefLines],
+) -> String {
+    const MAX_NAMED: usize = 20;
+    let Ok(re) = Regex::new(&format!(r"\b{}\b", regex::escape(symbol))) else {
+        return String::new();
+    };
+    let seen: HashSet<&PathBuf> = hits.iter().map(|h| &h.path).collect();
+    let mut skipped: Vec<String> = scope
+        .iter()
+        .filter(|p| !seen.contains(p))
+        .filter(|p| std::fs::read(p).is_ok_and(|b| re.is_match(&String::from_utf8_lossy(&b))))
+        .map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string())
+        .collect();
+    if skipped.is_empty() {
+        return String::new();
+    }
+    skipped.sort_unstable();
+    let more = skipped.len().saturating_sub(MAX_NAMED);
+    let more = if more > 0 { format!(", +{more} more") } else { String::new() };
+    let names = skipped[..skipped.len().min(MAX_NAMED)].join(", ");
+    format!(
+        "  … {} more file(s) match but are not in this view (build dir, minified or \
+         oversized; raw=true for their lines): {names}{more}\n",
+        skipped.len()
+    )
 }
 
 /// Separate a real diagnostic from the per-file noise a recursive search emits.
@@ -611,6 +734,51 @@ mod tests {
         );
         assert!(out.contains("u2.rs:"), "uses shown:\n{out}");
         assert!(!out.contains("outside.rs"), "outside rg scope:\n{out}");
+    }
+
+    /// A file rg matched whole-word but the reference scan cannot see (pruned
+    /// `build/`, minified, oversized) must still be named: the note promises
+    /// every file, and a silent gap reads as "not used there".
+    #[test]
+    fn route_names_rg_files_the_scan_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let body: String = (0..30)
+            .map(|i| format!("fn f{i}(_: Widget) {{}}\n"))
+            .collect();
+        std::fs::write(root.join("a.rs"), &body).unwrap();
+        std::fs::create_dir(root.join("build")).unwrap();
+        std::fs::write(root.join("build/gen.rs"), &body).unwrap();
+        let stdout = rg_lines(&root, &["a.rs", "build/gen.rs"], "Widget");
+        let out = route(&root, "Widget", &stdout, ROUTE_NOTE).expect("routed");
+        assert!(out.contains("not in this view") && out.contains("build/gen.rs"), "{out}");
+    }
+
+    #[test]
+    fn body_range_brace_python_and_eof() {
+        let js = ["  function kpis(rows) {", "    let a = 1;", "", "    return a;", "  }", "  function next() {}"];
+        assert_eq!(body_range(&js, 0), (0, 5));
+        let py = ["def f(x):", "    y = x", "", "    return y", "", "def g():"];
+        assert_eq!(body_range(&py, 0), (0, 4));
+        assert_eq!(body_range(&["fn a() {", "  1"], 0), (0, 2));
+    }
+
+    #[test]
+    fn definition_body_needs_a_single_definer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("a.rs"),
+            "pub fn widget_total(x: u32) -> u32 {\n    let y = x + 1;\n    y * 2\n}\n\npub fn other() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("b.rs"), "fn dup() {}\n").unwrap();
+        std::fs::write(root.join("c.rs"), "fn dup() {}\n").unwrap();
+        let out = definition_body(&root, "widget_total").expect("body");
+        assert!(out.starts_with("[definition of `widget_total` — a.rs:1-4]"), "{out}");
+        assert!(out.contains("3:     y * 2") && !out.contains("other"), "{out}");
+        assert_eq!(definition_body(&root, "dup"), None);
+        assert_eq!(definition_body(&root, "missing"), None);
     }
 
     #[test]

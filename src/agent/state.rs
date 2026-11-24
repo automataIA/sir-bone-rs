@@ -539,6 +539,13 @@ pub(crate) async fn run_turn(ctx: &mut AgentContext) -> Result<AgentState> {
         ]
     };
 
+    // Observation masking (opt-in): stub out stale read-only results before the
+    // transcript is sent. In-memory only; the session JSONL keeps the originals.
+    if super::mask::enabled() {
+        let n = super::mask::mask_stale(&mut ctx.messages);
+        crate::telemetry::add(&crate::telemetry::MASKED_RESULTS, n as u64);
+    }
+
     let sys_msgs: Vec<Message> = ctx
         .system_prompt
         .iter()

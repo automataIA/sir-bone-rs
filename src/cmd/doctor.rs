@@ -129,6 +129,23 @@ pub async fn run_doctor(cwd: &Path, cli: &Cli, system_prompt_chars: usize) -> Re
         });
     check(true, format!("model: {model}"));
 
+    // Thinking dial, labeled the way the active client sends it: GLM maps the
+    // budget to an effort level (same vocabulary the ZCode harness displays);
+    // other providers keep the raw token budget. Off on the OpenAI path still
+    // sends `minimal` on GLM (the endpoint has no true off), but the user-facing
+    // level is "off".
+    let glm = model.to_ascii_lowercase().starts_with("glm")
+        || base.contains("z.ai")
+        || base.contains("bigmodel");
+    let thinking_label = match (glm, cli.thinking_budget) {
+        (_, None) => "off".to_string(),
+        (true, Some(b)) if b <= 8000 => "low".to_string(),
+        (true, Some(b)) if b <= 16000 => "medium".to_string(),
+        (true, Some(_)) => "max".to_string(),
+        (false, Some(b)) => format!("{b} tokens"),
+    };
+    check(true, format!("thinking: {thinking_label}"));
+
     for (ok, msg) in [
         json_file_status(sirbone::config::global_path(), "global config"),
         json_file_status(sirbone::config::project_path(), "project config"),

@@ -66,7 +66,7 @@ impl NoteStore {
             "Preservare il comportamento estraneo alla richiesta; nessuna modifica non correlata.",
             "Nessuno identificato all'avvio; usare letture prima delle modifiche.",
             "Applicare la modifica minima compatibile con il progetto.",
-            "git diff --check",
+            verify_step(&std::env::current_dir().unwrap_or_default()),
             "Ispezionare, implementare, verificare.",
         ]);
         let mut state = lock_or_recover(&self.0);
@@ -131,6 +131,16 @@ impl NoteStore {
         state.content = render_contract(&values);
         crate::telemetry::add(&crate::telemetry::PLAN_CONTRACT_UPDATED, 1);
         Ok(())
+    }
+}
+
+/// The contract's verification step. `git diff --check` outside a git repo
+/// exits 129 ("not a git repository"), a failure the model then chases.
+fn verify_step(dir: &std::path::Path) -> &'static str {
+    if dir.ancestors().any(|a| a.join(".git").exists()) {
+        "git diff --check"
+    } else {
+        "Eseguire i test pertinenti del progetto."
     }
 }
 
@@ -212,6 +222,16 @@ impl TypedTool for NoteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_step_needs_a_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("pkg");
+        std::fs::create_dir(&sub).unwrap();
+        assert_ne!(verify_step(&sub), "git diff --check");
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert_eq!(verify_step(&sub), "git diff --check");
+    }
 
     #[tokio::test]
     async fn replaces_and_caps_outside_plan_mode() {

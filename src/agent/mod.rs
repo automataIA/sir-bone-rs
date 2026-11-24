@@ -16,6 +16,7 @@ use crate::types::{AgentState, EventTx, Message};
 
 mod compact;
 mod grounding;
+mod mask;
 mod policy;
 mod state;
 mod tokens;
@@ -1933,6 +1934,52 @@ mod tests {
         let ctx = make_ctx(client, ToolRegistry::new(), tx);
         let (decision, _) = decide(&ctx, "bash", &serde_json::json!({"command": "echo hi"})).await;
         assert_eq!(decision, Decision::Allow);
+    }
+
+    /// Headless: `rm` of a file this run created runs; a pre-existing file,
+    /// recursion, or a missing run snapshot keep the destructive Ask (which the
+    /// unattended path turns into a denial).
+    #[cfg_attr(
+        feature = "bench_bypass",
+        ignore = "asserts the gate this feature removes"
+    )]
+    #[tokio::test]
+    async fn decide_headless_rm_allows_only_own_scratch_files() {
+        let store = tempfile::tempdir().unwrap();
+        let proj = tempfile::tempdir().unwrap();
+        let p = |n: &str| proj.path().join(n).display().to_string();
+        std::fs::write(p("solution.go"), "x").unwrap();
+        let (tx, _rx) = mpsc::channel(64);
+        let mut ctx = make_ctx(FauxClient::new(vec![]), ToolRegistry::new(), tx);
+        let snaps = Arc::new(crate::snapshot::Snapshots::at(
+            store.path().join("snapshots.git"),
+            proj.path().to_path_buf(),
+        ));
+        ctx.snapshots = Some(Arc::clone(&snaps));
+        let rm = |c: String| serde_json::json!({ "command": c });
+        std::fs::write(p("early_test.go"), "x").unwrap();
+        // No run snapshot yet: nothing provably new.
+        let (d, _) = decide(&ctx, "bash", &rm(format!("rm {}", p("early_test.go")))).await;
+        assert_eq!(d, Decision::Ask);
+        snaps.take_once_id("run").await.unwrap();
+        std::fs::write(p("scratch_test.go"), "x").unwrap();
+        let ok = format!("rm -f {} && echo ran", p("scratch_test.go"));
+        assert_eq!(decide(&ctx, "bash", &rm(ok)).await.0, Decision::Allow);
+        // Created and removed by the same command: absent when decided.
+        let same = format!("cat > {t} <<'EOF'\nx\nEOF\ngo test; rm {t}", t = p("t_test.go"));
+        assert_eq!(decide(&ctx, "bash", &rm(same)).await.0, Decision::Allow);
+        for c in [
+            format!("mv {} {t} && rm {t}", p("solution.go"), t = p("t.go")),
+            format!("rm {}/../x.go", proj.path().display()),
+        ] {
+            assert_eq!(decide(&ctx, "bash", &rm(c.clone())).await.0, Decision::Ask, "{c}");
+        }
+        for c in [
+            format!("rm {} {}", p("scratch_test.go"), p("solution.go")),
+            format!("rm -rf {}", p("scratch_test.go")),
+        ] {
+            assert_eq!(decide(&ctx, "bash", &rm(c.clone())).await.0, Decision::Ask, "{c}");
+        }
     }
 
     #[cfg_attr(

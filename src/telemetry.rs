@@ -33,6 +33,10 @@ pub static TUSK_EDITS: AtomicU64 = AtomicU64::new(0);
 /// `tusk` invocations that withheld the result — a deliberate exit 2, or the
 /// fail-closed path (spawn failure, timeout, unexpected exit code).
 pub static TUSK_WITHHELD: AtomicU64 = AtomicU64::new(0);
+/// Tool results replaced by a stub by observation masking (`SIRBONE_MASK`).
+pub static MASKED_RESULTS: AtomicU64 = AtomicU64::new(0);
+/// Grep answers that carried a definition body (`SIRBONE_ROUTE_BODY`).
+pub static ROUTE_BODIES: AtomicU64 = AtomicU64::new(0);
 pub static HOOK_STOP_RUNS: AtomicU64 = AtomicU64::new(0);
 pub static HOOK_STOP_RETRIES: AtomicU64 = AtomicU64::new(0);
 pub static HOOK_STOP_EXHAUSTED: AtomicU64 = AtomicU64::new(0);
@@ -95,6 +99,9 @@ pub static TOOL_CALLS_EMITTED: AtomicU64 = AtomicU64::new(0);
 pub static PERMISSION_DENIES_POLICY: AtomicU64 = AtomicU64::new(0);
 pub static PERMISSION_DENIES_USER: AtomicU64 = AtomicU64::new(0);
 pub static PERMISSION_DENIES_UNATTENDED: AtomicU64 = AtomicU64::new(0);
+/// Headless `rm` calls let through because every target is a file this run
+/// created (see `policy::decide`) — each one was an unattended denial before.
+pub static SCRATCH_RM_ALLOWED: AtomicU64 = AtomicU64::new(0);
 
 /// Bench parity invariants, both zero in a normal build.
 ///

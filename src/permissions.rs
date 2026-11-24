@@ -2,6 +2,8 @@
 //! natural-language environment classifier. Pure/sync logic lives here; the
 //! LLM classifier call itself is driven from `agent.rs`.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
 /// Outcome of evaluating a tool call against the permission policy.
@@ -370,7 +372,7 @@ pub fn is_safe_readonly(cmd: &str) -> bool {
 /// Whether a shell segment redirects stdout/stderr to a file (a write, not a
 /// read). Quote-aware; `n>&m` fd-duplication (e.g. `2>&1`) is NOT a file
 /// redirect and is allowed.
-fn writes_file(seg: &str) -> bool {
+pub(crate) fn writes_file(seg: &str) -> bool {
     let b = seg.as_bytes();
     let (mut in_s, mut in_d) = (false, false);
     let mut i = 0;
@@ -426,6 +428,56 @@ pub fn is_destructive(cmd: &str) -> bool {
                 || lower.trim() == "rm"
         }
     }
+}
+
+/// The files a command deletes when its only destructive parts are plain
+/// `rm` of named files: no recursion, no globs or expansions, no `sudo`, and
+/// no other destructive program, and no `mv` (which could move existing data
+/// under a target's name before the `rm`). Relative targets are joined onto
+/// the last `cd <dir>` before them (the caller resolves what stays relative
+/// against the working directory). `None` for anything else — callers then
+/// keep the normal destructive-command confirmation.
+pub fn plain_rm_targets(cmd: &str) -> Option<Vec<PathBuf>> {
+    const FIRST: &[&str] = &["rm", "rmdir", "dd", "shred", "mkfs", "sudo", "mv", "rename"];
+    const NULL_REDIRS: &[&str] = &["2>/dev/null", ">/dev/null", "1>/dev/null", "&>/dev/null", "2>&1"];
+    let mut base = PathBuf::new();
+    let mut targets = Vec::new();
+    for seg in shell_segments(cmd)? {
+        let c = seg.trim();
+        if c.contains(":(){") {
+            return None;
+        }
+        let mut words = c.split_whitespace();
+        match words.next() {
+            Some("cd") => {
+                let dir = words.next()?;
+                if words.next().is_some() || dir.contains(['$', '~', '`', '*']) {
+                    return None;
+                }
+                base = base.join(dir);
+            }
+            Some("rm") => {
+                for w in words {
+                    match w {
+                        "--" | "--force" | "--verbose" => {}
+                        _ if NULL_REDIRS.contains(&w) => {}
+                        _ if w.starts_with('-') => {
+                            if !w[1..].chars().all(|f| matches!(f, 'f' | 'v')) || w.len() == 1 {
+                                return None;
+                            }
+                        }
+                        _ if w.contains(['*', '?', '[', ']', '{', '}', '$', '~', '`', '\'', '"', '\\', '>', '<']) => {
+                            return None;
+                        }
+                        _ => targets.push(base.join(w)),
+                    }
+                }
+            }
+            Some(w) if FIRST.contains(&w) => return None,
+            _ => {}
+        }
+    }
+    (!targets.is_empty()).then_some(targets)
 }
 
 /// Match a `Tool(body)` permission pattern against a tool name and its inner
@@ -534,6 +586,27 @@ pub fn parse_classification(text: &str, original: &str) -> (Decision, Option<Str
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn plain_rm_targets_shapes() {
+        let t = |c: &str| plain_rm_targets(c).map(|v| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
+        // Shapes seen in blocked ACB trajectories.
+        assert_eq!(t("rm test.sh"), Some(vec!["test.sh".into()]));
+        assert_eq!(t("rm -f t.txt; cat > /tmp/x <<'EOF'\nhi\nEOF"), Some(vec!["t.txt".into()]));
+        assert_eq!(
+            t("cd /work && rm a_test.go b_test.go && /usr/local/bin/run_code.sh go s.go"),
+            Some(vec!["/work/a_test.go".into(), "/work/b_test.go".into()])
+        );
+        assert_eq!(t("rm /work/x.rkt 2>/dev/null; true"), Some(vec!["/work/x.rkt".into()]));
+        // Everything else keeps the confirmation.
+        for c in [
+            "rm -rf build", "rm -r x", "rm -d x", "rm *.o", "rm $F", "rm ~/x", "sudo rm a",
+            "rm a && dd if=/dev/zero of=b", "rm $(ls)", "rm", "rmdir d", "cd $HOME && rm a",
+            "rm 'a b'", "rm -i a", "mv solution.go t.go && rm t.go",
+        ] {
+            assert_eq!(t(c), None, "{c}");
+        }
+    }
 
     proptest! {
         /// `*` matches any string whatsoever.

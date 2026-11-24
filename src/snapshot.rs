@@ -27,6 +27,8 @@ pub struct Snapshots {
     git_dir: PathBuf,
     work_tree: PathBuf,
     taken: AtomicBool,
+    /// Commit id of this run's snapshot, once [`Snapshots::take_once_id`] took it.
+    run_id: std::sync::OnceLock<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -63,6 +65,7 @@ impl Snapshots {
             git_dir,
             work_tree,
             taken: AtomicBool::new(false),
+            run_id: std::sync::OnceLock::new(),
         }
     }
 
@@ -122,12 +125,51 @@ impl Snapshots {
             return None;
         }
         match self.snapshot_id(label).await {
-            Ok(id) => Some(id),
+            Ok(id) => {
+                let _ = self.run_id.set(id.clone());
+                Some(id)
+            }
             Err(e) => {
                 tracing::warn!("workspace snapshot failed: {e}");
                 None
             }
         }
+    }
+
+    /// Whether `path` is a regular file this run created: absent from the run
+    /// snapshot (its index is the snapshot's `add -A`), inside the work tree,
+    /// and not ignored — an ignored file is never snapshotted, so its absence
+    /// proves nothing. `false` whenever that cannot be shown, including before
+    /// the run snapshot exists.
+    pub async fn created_this_run(&self, path: &Path) -> bool {
+        if self.run_id.get().is_none()
+            || !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+        {
+            return false;
+        }
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        let (Ok(parent), Ok(tree)) = (parent.canonicalize(), self.work_tree.canonicalize()) else {
+            return false;
+        };
+        let Ok(rel) = parent.join(name).strip_prefix(&tree).map(Path::to_path_buf) else {
+            return false;
+        };
+        let rel = rel.to_string_lossy();
+        self.git(&["ls-files", "--others", "--exclude-standard", "--", &rel])
+            .await
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l == rel))
+    }
+
+    /// Whether `path` does not exist yet and lies inside the work tree: an
+    /// `rm` of it can only remove what the same command creates first (the
+    /// `cat > t.go <<EOF … && run … && rm t.go` scratch-test shape). Lexical,
+    /// since the parent may not exist yet; `..` is refused outright.
+    pub fn not_yet_created(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_err()
+            && !path.components().any(|c| c == std::path::Component::ParentDir)
+            && self.work_tree.canonicalize().is_ok_and(|t| path.starts_with(t))
     }
 
     /// Commit the current work-tree state. `Ok(false)` = nothing changed.
@@ -328,6 +370,31 @@ mod tests {
         // Safety snapshot makes the rollback itself reversible.
         let entries = snaps.list(10).await;
         assert!(entries.iter().any(|(_, _, s)| s.contains("pre-rollback")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn created_this_run_only_for_new_unignored_files() -> Result<()> {
+        let store = tempfile::tempdir()?;
+        let proj = tempfile::tempdir()?;
+        let p = |n: &str| proj.path().join(n);
+        tokio::fs::write(p("old.txt"), "x").await?;
+        tokio::fs::write(p(".gitignore"), "*.log\n").await?;
+        tokio::fs::write(p("pre.log"), "x").await?;
+        let snaps = temp_snaps(proj.path(), store.path());
+        assert!(!snaps.created_this_run(&p("old.txt")).await, "no run snapshot yet");
+        assert!(snaps.take_once_id("run").await.is_some());
+        tokio::fs::write(p("scratch_test.go"), "x").await?;
+        tokio::fs::write(p("new.log"), "x").await?;
+        tokio::fs::create_dir(p("d")).await?;
+        tokio::fs::write(p("d/t.py"), "x").await?;
+        assert!(snaps.created_this_run(&p("scratch_test.go")).await);
+        assert!(snaps.created_this_run(&p("d/t.py")).await);
+        assert!(!snaps.created_this_run(&p("old.txt")).await, "pre-existing");
+        assert!(!snaps.created_this_run(&p("pre.log")).await, "ignored, unknowable");
+        assert!(!snaps.created_this_run(&p("new.log")).await, "ignored");
+        assert!(!snaps.created_this_run(&p("d")).await, "directory");
+        assert!(!snaps.created_this_run(&p("missing.txt")).await);
         Ok(())
     }
 

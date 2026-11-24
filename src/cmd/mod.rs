@@ -17,7 +17,7 @@ pub use doctor::run_doctor;
 pub use env_list::run_env_list;
 pub use ground::run_ground;
 pub use hook::run_hook;
-pub use login::{login_codex, run_login, set_credentials};
+pub use login::{list_models_for, login_codex, run_login, set_credentials};
 pub use session_cmds::{run_audit, run_snapshots};
 pub use setup_verification::run as run_setup_verification;
 pub use stats::run_stats;

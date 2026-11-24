@@ -159,7 +159,8 @@ guardrail fails `cargo test trust_matrix` instead of silently shipping.
 
 - **Permission pipeline** — `allow`/`soft_deny` globs, destructive-command detection, git guardrails,
   a command-injection guard (every chained segment must pass on its own), and an optional LLM
-  classifier for ambiguous bash once you describe the machine.
+  classifier for ambiguous bash once you describe the machine. Headless runs (no confirm prompt)
+  may `rm` only plain files the run itself created after its snapshot; anything else stays denied.
 - **Reversible** — a shadow git repo commits the work tree once per run before the first mutation;
   `/rollback` restores it. Your project's own `.git` is never touched.
 - **Read-only runs** — `--review-only` unregisters the writing tools, refuses any tool that declares

@@ -233,6 +233,16 @@ const VARS: &[(&str, &str, bool)] = &[
         false,
     ),
     (
+        "SIRBONE_MASK",
+        "1 = observation masking: stub read-only tool results older than 20 turns once 15 KB can be reclaimed (opt-in; A/B neutral on short sessions)",
+        false,
+    ),
+    (
+        "SIRBONE_ROUTE_BODY",
+        "1 = grep for a bare identifier declared in one file also returns its body (≤60 lines) (opt-in; not yet exercised in A/B)",
+        false,
+    ),
+    (
         "SIRBONE_YAGNI",
         "1 = minimal-code prompt clause (A/B'd net-negative; off by default)",
         false,
